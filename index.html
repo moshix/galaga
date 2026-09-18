@@ -1,0 +1,276 @@
+<!doctype html>
+<!-- Copyright 2026 by Moshix -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Galaga (1981)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    margin: 0; height: 100%; background: #000; color: #cfcfcf;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  body { display: grid; place-items: center; gap: 12px; }
+  /*
+   * The canvas backing store is the arcade screen itself: 224x288, one canvas
+   * pixel per arcade pixel. Scaling happens only in CSS, at an integer factor,
+   * so the render path never resamples.
+   */
+  #screen {
+    width: calc(224px * var(--zoom, 2));
+    height: calc(288px * var(--zoom, 2));
+    image-rendering: pixelated;
+    background: #000;
+    display: block;
+  }
+  #hint { opacity: .55; letter-spacing: .04em; text-align: center; }
+  /* Pausing freezes the simulation but leaves the canvas painted, so the page
+     needs to say so or a still screen looks like a crash. */
+  #hint.paused { opacity: 1; color: #ffb86b; }
+  #hint.paused::after { content: " — PAUSED"; font-weight: 700; }
+
+  /*
+   * The AI indicator. Whether the game is playing itself is not obvious from
+   * the screen -- a competent AI looks exactly like a competent player -- so
+   * the control that turns it on lights up while it is running.
+   *
+   * The glow is drawn with box-shadow rather than an outline so it reads as a
+   * halo with soft edges, and the element keeps its padding and border in both
+   * states so switching modes does not shift the rest of the line sideways.
+   */
+  #ai-hint {
+    padding: 1px 6px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    transition: color .18s, background-color .18s, box-shadow .18s, border-color .18s;
+  }
+  #ai-hint.on {
+    color: #bfe2ff;
+    border-color: rgba(124, 196, 255, .55);
+    background: rgba(124, 196, 255, .10);
+    box-shadow: 0 0 6px rgba(124, 196, 255, .55), 0 0 18px rgba(124, 196, 255, .30);
+    text-shadow: 0 0 8px rgba(124, 196, 255, .8);
+    animation: ai-pulse 1.9s ease-in-out infinite;
+  }
+  #ai-hint.on kbd { border-color: rgba(124, 196, 255, .6); color: #dff0ff; }
+  @keyframes ai-pulse {
+    0%, 100% { box-shadow: 0 0 6px rgba(124,196,255,.45), 0 0 16px rgba(124,196,255,.22); }
+    50%      { box-shadow: 0 0 9px rgba(124,196,255,.75), 0 0 26px rgba(124,196,255,.45); }
+  }
+  /* A pulsing glow is exactly the sort of thing that should hold still for
+     anyone who has asked their system to stop animating. */
+  @media (prefers-reduced-motion: reduce) {
+    #ai-hint.on { animation: none; }
+    #ai-hint { transition: none; }
+  }
+  /*
+   * Fixed to the corner of the viewport rather than placed in the body grid, so
+   * it never shifts the canvas as the zoom changes. `pointer-events: none`
+   * keeps it from swallowing a click meant for the page.
+   */
+  #version {
+    position: fixed; right: 8px; bottom: 6px;
+    color: #9a9a9a; font-size: 10px; opacity: .55;
+    letter-spacing: .04em; pointer-events: none; user-select: none;
+  }
+  @media (max-width: 560px) { #version { position: static; } }
+  kbd {
+    background: #1b1b1b; border: 1px solid #333; border-radius: 3px;
+    padding: 0 4px; font: inherit;
+  }
+  #hint button.link {
+    background: none; border: 0; padding: 0; font: inherit; color: inherit;
+    text-decoration: underline; text-underline-offset: 2px; cursor: pointer;
+  }
+  /*
+   * A native <dialog> rather than a hand-rolled overlay: showModal() gives
+   * focus trapping, an inert background, Escape-to-close and ::backdrop for
+   * nothing, all of which would otherwise be JavaScript to get wrong.
+   */
+  #remap {
+    background: #0a0a0a; color: #cfcfcf; font: inherit;
+    border: 1px solid #333; border-radius: 4px; padding: 16px; min-width: 300px;
+  }
+  #remap::backdrop { background: rgba(0, 0, 0, .72); }
+  #remap h2 { margin: 0 0 4px; font-size: 12px; letter-spacing: .08em; font-weight: normal; }
+  #remap table { border-collapse: collapse; margin: 10px 0; width: 100%; }
+  #remap th { text-align: left; font-weight: normal; opacity: .55; padding: 2px 10px 2px 0; }
+  #remap td { padding: 3px 10px 3px 0; }
+  #remap td.bind { color: #8fd18f; min-width: 90px; }
+  #remap td.bind.unbound { color: #7a7a7a; }
+  /* An aside in a control's label, for the one action the board never had. */
+  #remap td .note { opacity: .55; }
+  #remap button {
+    background: #1b1b1b; border: 1px solid #333; border-radius: 3px;
+    color: inherit; font: inherit; padding: 1px 8px; cursor: pointer;
+  }
+  #remap button:hover { border-color: #555; }
+  #remap button:focus-visible { outline: 1px solid #8fd18f; outline-offset: 1px; }
+  #remapstatus { margin: 8px 0 0; opacity: .7; min-height: 1.5em; }
+  #remap .foot { margin-top: 12px; display: flex; gap: 6px; flex-wrap: wrap; }
+</style>
+<script>
+/*
+ * Cache busting.
+ *
+ * `python3 -m http.server` sends Last-Modified but no Cache-Control and no
+ * ETag, so Chrome falls back to heuristic caching and may reuse a module
+ * without revalidating. During development that is a genuinely confusing
+ * failure: the page loads, the console is clean, and yesterday's code runs.
+ *
+ * Every load mints a token and an import map rewrites each module URL to carry
+ * it, so the entire graph is refetched -- not just the entry point, which is
+ * the mistake that makes the naive `import('./main.js?v=…')` trick useless.
+ *
+ * The list below is generated by `node tools/gen-index.mjs`; a test keeps it in
+ * step with what is actually in src/.
+ */
+(() => {
+  const modules = [
+    /* MODULES:BEGIN */
+      'ai/autoplay.js',
+      'audio/mcu54rom.js',
+      'audio/mixer.js',
+      'audio/n54filter.js',
+      'audio/n54voice.js',
+      'audio/resample.js',
+      'audio/sound.js',
+      'audio/waveforms.js',
+      'audio/wsg-worklet.js',
+      'audio/wsg.js',
+      'game/call.js',
+      'game/io.js',
+      'game/main/gg1_1.js',
+      'game/main/gg1_1_flow.js',
+      'game/main/gg1_1_irq.js',
+      'game/main/gg1_1_rst.js',
+      'game/main/gg1_1_score.js',
+      'game/main/gg1_1_state.js',
+      'game/main/gg1_1_tasks.js',
+      'game/main/gg1_2.js',
+      'game/main/gg1_2_fx.js',
+      'game/main/gg1_2_util.js',
+      'game/main/gg1_3.js',
+      'game/main/gg1_3_capture.js',
+      'game/main/gg1_3_objects.js',
+      'game/main/gg1_3_stage.js',
+      'game/main/gg1_3_waves.js',
+      'game/main/gg1_4.js',
+      'game/main/gg1_4_post.js',
+      'game/main/gg1_4_svc.js',
+      'game/main/gg1_4_text.js',
+      'game/main/gg1_4_top5.js',
+      'game/main/index.js',
+      'game/main/routines.js',
+      'game/romdata.js',
+      'game/scheduler.js',
+      'game/sound/gg1_7.js',
+      'game/sound/index.js',
+      'game/sound/routines.js',
+      'game/sub/gg1_5.js',
+      'game/sub/gg1_5_hitd.js',
+      'game/sub/gg1_5_motion.js',
+      'game/sub/index.js',
+      'game/sub/routines.js',
+      'game/z80ops.js',
+      'input/bindings.js',
+      'input/capture.js',
+      'input/gamepad.js',
+      'input/mux.js',
+      'input/remapui.js',
+      'machine/machine.js',
+      'machine/mb88.js',
+      'machine/namco51.js',
+      'machine/namco54.js',
+      'main.js',
+      'video/palette.js',
+      'video/renderer.js',
+      'video/resnet.js',
+      'video/sprites.js',
+      'video/starfield.js',
+      'video/tiles.js',
+    /* MODULES:END */
+  ];
+  const token = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+  const imports = {};
+  for (const path of modules) imports[`./src/${path}`] = `./src/${path}?v=${token}`;
+  const map = document.createElement('script');
+  map.type = 'importmap';
+  map.textContent = JSON.stringify({ imports });
+  document.currentScript.after(map);
+  window.__galagaCacheToken = token;
+})();
+</script>
+</head>
+<body>
+  <canvas id="screen" width="224" height="288"></canvas>
+  <div id="hint">
+    <kbd>&larr;</kbd> <kbd>&rarr;</kbd> move &nbsp;·&nbsp; <kbd>space</kbd> fire &nbsp;·&nbsp;
+    <kbd>5</kbd> coin &nbsp;·&nbsp; <kbd>1</kbd>/<kbd>2</kbd> start &nbsp;·&nbsp;
+    <span id="ai-hint"><kbd>A</kbd> self-playing AI</span> &nbsp;·&nbsp;
+    <kbd>P</kbd> pause &nbsp;·&nbsp;
+    <kbd>M</kbd> sound &nbsp;·&nbsp;
+    <kbd>+</kbd>/<kbd>-</kbd> zoom &nbsp;·&nbsp;
+    <kbd>G</kbd> <button type="button" class="link" id="openremap">joystick</button>
+  </div>
+
+  <dialog id="remap" aria-labelledby="remaptitle">
+    <h2 id="remaptitle">JOYSTICK</h2>
+    <table>
+      <thead><tr><th>control</th><th>bound to</th><th></th></tr></thead>
+      <tbody>
+        <tr data-action="left">
+          <td>move left</td><td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+        <tr data-action="right">
+          <td>move right</td><td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+        <tr data-action="fire">
+          <td>fire</td><td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+        <!--
+          Every action in ACTIONS needs a row here. RemapUI builds itself from
+          these `data-action` attributes, so an action without one cannot be
+          rebound or cleared -- and the shipped defaults are guesses about
+          hardware we have never seen. A six-button stick that numbers its
+          buttons 0-5 puts a punch on pause's default; without a row the player
+          would have no way to take it back.
+        -->
+        <tr data-action="coin">
+          <td>insert coin</td><td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+        <tr data-action="start">
+          <td>1 player start</td><td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+        <tr data-action="pause">
+          <td>pause <span class="note">(not on the real board)</span></td>
+          <td class="bind" data-bind>—</td>
+          <td><button type="button" data-set>set</button>
+              <button type="button" data-clear>clear</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <p id="remapstatus" aria-live="polite"></p>
+    <div class="foot">
+      <button type="button" id="remapdefaults">defaults</button>
+      <button type="button" id="remapcentre">recalibrate centre</button>
+      <button type="button" id="remapclose">close</button>
+    </div>
+  </dialog>
+  <div id="version">version &hellip; &middot; code by Moshix</div>
+  <script type="module">
+    import(`./src/main.js?v=${window.__galagaCacheToken}`);
+  </script>
+</body>
+</html>
