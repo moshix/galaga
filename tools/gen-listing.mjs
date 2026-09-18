@@ -326,9 +326,13 @@ function writeRomData(rom, masks) {
    * of noise: `ld h,$01 / ld a,(hl)`. c_08AD/c_08BE ($08AD, $08BE) index
    * their bomber-timer tables without a bounds check and walk into
    * $0935-$0B0E -- in normal play (stage parameter 2 with 40 enemies reads
-   * $0935) and for ~380 frames after power-on on RAM-test leftovers.
+   * $0935) and for ~380 frames after power-on on RAM-test leftovers. On the
+   * wrapped-around stage 0 (after stage 255) the wave builder c_25A2 indexes
+   * its tables with $FF and reads $2896-$2ACD as wave data.
    */
-  const READ_AS_DATA = { main: [[0x0100, 0x0200], [0x0935, 0x0b0f]], sub: [], sound: [] };
+  const READ_AS_DATA = {
+    main: [[0x0100, 0x0200], [0x0935, 0x0b0f], [0x2896, 0x2ace]], sub: [], sound: [],
+  };
   for (const cpu of ['main', 'sub', 'sound']) {
     const data = Uint8Array.from(rom[cpu]);
     for (const [lo, hi] of READ_AS_DATA[cpu]) masks[cpu].fill(0, lo, hi);

@@ -28,12 +28,24 @@ install. It's plain ES modules served as static files.
 | A | let the computer play |
 | P | pause |
 | M | sound on/off |
+| F | fast fire (a hack, off by default) |
 | + / − | zoom |
 | G | set up a joystick or gamepad |
+
+The same toggles sit in a small settings bar under the screen: the AI player,
+fast fire, sound and the joystick setup.
 
 Any USB stick or pad works. Press G, then push the control you want for each
 action. Cheap sticks report their buttons in whatever order they like, so
 there's no fixed layout to guess at.
+
+Fast fire is the one deliberate departure from the original, and it's off
+unless you turn it on (the page remembers your choice). Galaga has no DIP
+switch for it; MAME's "fast shoot" set, `galagamf`, is a patched ROM for the
+enemy CPU, which is the CPU that moves your shots. Here the shots simply
+travel twice as fast, so they leave the screen sooner and the game's
+two-shots-at-a-time limit frees up sooner. I don't have that patched ROM, so
+this is "faster shots", not a copy of that set.
 
 ## So what's different from MAME?
 

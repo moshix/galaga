@@ -26,6 +26,7 @@
 
 import { MAIN } from './routines.js';
 import { call } from '../call.js';
+import { HALT, BUSY } from '../scheduler.js';
 import { bcdAdd } from '../z80ops.js';
 import { rst_18, rst_28, rst_30, c_sctrl_sprite_ram_clr } from './gg1_1_rst.js';
 import { c_093C } from './gg1_1_tasks.js';
@@ -83,6 +84,8 @@ export function c_sctrl_playfld_clr(m) {
  * @see Machine.charge, src/game/scheduler.js
  */
 export const PLAYFLD_CLR_CYCLES = 39384;
+/** $06E0 (after the game-over halt) to g_main's state write at $0380. */
+export const GAME_OVER_TAIL_CYCLES = 25877;
 /** stg_init_env ($01C5), as the attract sequencer calls it. */
 export const STG_INIT_ENV_CYCLES = 18296;
 
@@ -455,7 +458,7 @@ function* blk_04E2(m) {
     const fx0c = m.peek(0x9aac);
     if ((m.peek(0x9ab6) | fx0c) === 0) break;
     if (fx0c !== 0) m.poke(0x9aac, 1);
-    yield;
+    yield HALT; // $055F
   }
   c_sctrl_playfld_clr(m);
   if (m.peek(0x99b3) === 0) return 0x06de;
@@ -641,7 +644,7 @@ function* blk_0650(m) {
  * @returns {Block}
  */
 function* blk_06DE(m) {
-  yield; // $06DE: halt -- until the next vblank IRQ
+  yield HALT; // $06DE: halt -- until the next vblank IRQ
   m.di();
   // $06E0: wait for the 06XX to be idle (always so in the port, where a
   // transfer completes as soon as it is issued).
@@ -664,6 +667,10 @@ function* blk_06DE(m) {
   const lo = bcdAdd((m.peek(0x99b3) + 1) & 0xff, m.peek(0x99e1));
   m.poke(0x99e1, lo.a);
   if (lo.cf) m.poke(0x99e0, bcdAdd(m.peek(0x99e0), 1).a);
+  // Everything from waking at $06E0 to g_main writing the attract state
+  // ($0380) takes the Z80 about half a frame: the 06XX transfer, the totals.
+  m.charge(GAME_OVER_TAIL_CYCLES);
+  yield BUSY;
   return 0x035a;
 }
 

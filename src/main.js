@@ -29,7 +29,7 @@ import { SoundEngine } from './audio/sound.js';
  * Displayed in the corner of the page and the single place this is written
  * down. Bump it here when a feature lands, and keep `package.json` in step.
  */
-export const VERSION = '0.2';
+export const VERSION = '0.3';
 
 const FRAME_MS = 1000 / FRAME_RATE;
 /** Never try to catch up more than this after a tab has been backgrounded. */
@@ -43,6 +43,18 @@ const MAX_CATCHUP_FRAMES = 4;
 const TAKEOVER_ACTIONS = /** @type {ReadonlySet<string>} */ (
   new Set(['left', 'right', 'fire'])
 );
+
+/** localStorage key for the fast-fire setting. */
+const FAST_FIRE_KEY = 'galaga.fastFire.v1';
+
+/**
+ * Reflect a toggle's state on its settings button.
+ * @param {string} id @param {boolean} on
+ */
+function setPressed(id, on) {
+  const el = document.getElementById(id);
+  if (el !== null) el.setAttribute('aria-pressed', String(on));
+}
 
 /** Keyboard to switch mapping. @see reference/mame/galaga.cpp INPUT_PORTS */
 const KEY_MAP = /** @type {const} */ ({
@@ -257,6 +269,26 @@ export class Game {
     this.mux.invalidate();
     const indicator = document.getElementById('ai-hint');
     if (indicator !== null) indicator.classList.toggle('on', on);
+    setPressed('set-ai', on);
+  }
+
+  /**
+   * The fast-fire hack: shots travel twice as fast (Machine.hacks). Off by
+   * default because it is not the original game; remembered per browser.
+   * @param {boolean} on
+   */
+  setFastFire(on) {
+    this.machine.hacks.fastFire = on;
+    setPressed('set-fast', on);
+    try { localStorage.setItem(FAST_FIRE_KEY, on ? '1' : '0'); } catch { /* storage unavailable */ }
+  }
+
+  /** Mute or unmute, keeping the settings button in step. */
+  toggleSound() {
+    void this.sound.start().then(() => {
+      this.sound.toggle();
+      setPressed('set-sound', !this.sound.muted);
+    });
   }
 
   present() {
@@ -330,7 +362,10 @@ function attachInput(game) {
       game.setPaused(!game.paused);
       e.preventDefault();
     } else if (e.code === 'KeyM') {
-      void game.sound.start().then(() => game.sound.toggle());
+      game.toggleSound();
+      e.preventDefault();
+    } else if (e.code === 'KeyF') {
+      game.setFastFire(!game.machine.hacks.fastFire);
       e.preventDefault();
     }
     else if (e.code === 'Equal' || e.code === 'NumpadAdd') game.setZoom(game.zoom + 1);
@@ -342,6 +377,23 @@ function attachInput(game) {
   document.addEventListener('visibilitychange', () => {
     game.setHidden(document.hidden === true);
   });
+
+  // The settings bar. Each button does what its key does; focus is dropped
+  // afterwards so that Space -- the fire button -- cannot press it again.
+  /** @param {string} id @param {() => void} action */
+  const button = (id, action) => {
+    const el = document.getElementById(id);
+    if (el === null) return;
+    el.addEventListener('click', () => {
+      void game.sound.start();
+      action();
+      el.blur();
+    });
+  };
+  button('set-ai', () => game.setAi(!game.aiEnabled));
+  button('set-fast', () => game.setFastFire(!game.machine.hacks.fastFire));
+  button('set-sound', () => game.toggleSound());
+  button('set-joy', () => game.remap?.toggle());
 
   window.addEventListener('gamepadconnected', () => { game.gamepad.recalibrate(); });
   window.addEventListener('gamepaddisconnected', () => {
@@ -404,6 +456,9 @@ if (canvas !== null) {
   game.setZoom(2);
   game.remap = new RemapUI(game.gamepad);
   attachInput(game);
+  let fast = false;
+  try { fast = localStorage.getItem(FAST_FIRE_KEY) === '1'; } catch { /* storage unavailable */ }
+  game.setFastFire(fast);
   applyUrlWarmup(game);
   game.start();
   // Handy for headless tests and for poking at things in the console.

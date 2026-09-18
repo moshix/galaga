@@ -6,7 +6,7 @@
  * replaces that with one fixed order per 1/60.606 s frame, chosen to follow
  * the hardware's own timeline:
  *
- *   line 150   (FRAME_LINE: where a port frame starts)
+ *   line 160   (FRAME_LINE: where a port frame starts)
  *   line 192   sound CPU NMI          (galaga.cpp cpu3_interrupt_callback)
  *   line 224   vblank: main and sub CPU IRQs (galaga_state::vblank_irq)
  *              -> the IRQ handlers run to completion (they never wait,
@@ -39,6 +39,24 @@ import { CPU } from '../machine/machine.js';
 
 /** Value a foreground generator yields to be re-polled within the frame. */
 export const SPIN = Symbol('spin');
+
+/**
+ * Yielded by foreground code at a Z80 `halt`: sleep until the next vblank
+ * interrupt. It differs from a plain `yield` only when the CPU is still
+ * busy with work carried over from earlier frames (Machine.charge): the
+ * `halt` is reached only once that work is done, so it wakes one interrupt
+ * after that, not at the next one.
+ */
+export const HALT = Symbol('halt');
+
+/**
+ * Yielded by foreground code right after charging measured time
+ * (Machine.charge) for a stretch of work: "this took the Z80 that long".
+ * The scheduler resumes the code at once if the time fits in what is left
+ * of the frame, and otherwise only once the frames it spills into have
+ * passed -- so whatever comes next happens when it does on the board.
+ */
+export const BUSY = Symbol('busy');
 
 /**
  * Yielded by an IRQ handler generator at the vblank rendezvous: right after
@@ -75,6 +93,25 @@ export const SUB_OVERLAP_CYCLES = 8000;
 /** The sub CPU's task slot that moves the enemies (f_08D3). */
 export const SUB_MOTION_SLOT = 2;
 
+/**
+ * Thrown by ported code where the Z80 would loop forever (for example the
+ * wave builder on the wrapped-around stage 0 at some ranks). The scheduler
+ * parks that CPU's foreground for good -- interrupts keep being serviced,
+ * exactly like a real Z80 spinning in place -- instead of locking up the
+ * browser in a JavaScript infinite loop. Throw it only after doing every
+ * write the endless loop would have settled into.
+ */
+export class CpuHang extends Error {
+  /** @param {string} where */
+  constructor(where) {
+    super(`CPU loops forever at ${where}`);
+    this.name = 'CpuHang';
+  }
+}
+
+/** A foreground that does nothing, forever. @returns {Thread} */
+function* parked() { for (;;) yield; }
+
 /** Sound CPU NMI scan lines. */
 export const SOUND_NMI_LINES = Object.freeze([64, 192]);
 
@@ -88,6 +125,13 @@ export const SOUND_NMI_LINES = Object.freeze([64, 192]);
  * exactly the same work: sound NMI (192), vblank (224), sound NMI (64).
  */
 export const FRAME_LINE = 160;
+
+/**
+ * The main foreground's time on either side of the vblank handlers within
+ * one port frame (FRAME_LINE to FRAME_LINE): before vblank, and after it.
+ */
+export const PRE_SLOT_CYCLES = (224 - FRAME_LINE) * 192;
+export const POST_SLOT_CYCLES = CYCLES_PER_FRAME - PRE_SLOT_CYCLES;
 
 /**
  * @typedef {import('../machine/machine.js').Machine} Machine
@@ -146,10 +190,14 @@ export class Scheduler {
       [CPU.SUB, Infinity],
       [CPU.MAIN, Infinity],
     ];
+    /** Why each CPU's foreground is hung, if it is (CpuHang). @type {(string|null)[]} */
+    this.hung = [null, null, null];
     /** Cycles the main handler charged this frame (for the foreground budget). */
     this.irqCharged = 0;
     /** Main foreground work still owed from earlier frames, in cycles. */
     this.fgDebt = 0;
+    /** What each foreground last yielded (SPIN, HALT or undefined). @type {unknown[]} */
+    this.lastYield = [undefined, undefined, undefined];
     /** Slot each CPU's handler is paused before, if any. @type {(number|null)[]} */
     this.pendingSlot = [null, null, null];
     /** @type {(Thread|null)[]} */
@@ -244,6 +292,7 @@ export class Scheduler {
   stepFrame() {
     const m = this.m;
     this.soundNmi(); // line 192
+    this.preForeground(); // FRAME_LINE .. vblank
     // Vblank asserts the IRQ lines of the CPUs whose enable latch is set. A
     // main handler still running from last frame has its latch clear, so
     // this vblank is simply lost for it.
@@ -352,18 +401,31 @@ export class Scheduler {
     const m = this.m;
     /** @type {boolean[]} */
     const spinning = [false, false, false];
-    // The main CPU's foreground only gets the part of the frame its vblank
-    // handler leaves. Work it charged beyond that (a playfield clear is most
-    // of a frame) keeps the real Z80 busy into the following frames, so the
-    // port holds its foreground back for as long -- the work itself already
-    // happened, but nothing after it can happen any sooner than on the board.
-    const budget = Math.max(0, CYCLES_PER_FRAME - MAIN_IRQ_BASE_CYCLES - this.irqCharged);
-    const mainFree = this.fgDebt < budget;
+    // The main CPU's foreground gets what its vblank handler leaves of the
+    // port frame, up to FRAME_LINE. Work it charged beyond that (a playfield
+    // clear is most of a frame) keeps the real Z80 busy into the following
+    // frames, so the port holds its foreground back for as long -- the work
+    // itself already happened, but nothing after it can happen any sooner
+    // than on the board. (The stretch from FRAME_LINE to vblank is spent in
+    // preForeground at the start of the next frame.)
+    const budget = Math.max(0, POST_SLOT_CYCLES - MAIN_IRQ_BASE_CYCLES - this.irqCharged);
+    let mainFree = this.fgDebt < budget;
     if (!mainFree) this.fgDebt -= budget;
+    else if (this.fgDebt > 0 && this.lastYield[CPU.MAIN] === HALT) {
+      // The work finishes this frame and only then reaches the `halt`,
+      // which sleeps until the next interrupt.
+      this.fgDebt = 0;
+      mainFree = false;
+    }
     const chargedBefore = m.charged;
     for (let n = 0; n < 3; n += 1) {
       if (n === CPU.MAIN && !mainFree) continue;
       spinning[n] = this.resume(n);
+      // Carry on after a BUSY while the charged time still fits the frame.
+      while (n === CPU.MAIN && this.lastYield[n] === BUSY
+        && this.fgDebt + (m.charged - chargedBefore) <= budget) {
+        spinning[n] = this.resume(n);
+      }
     }
     for (let round = 0; round < 64 && spinning.some(Boolean); round += 1) {
       const before = m.writes;
@@ -377,6 +439,30 @@ export class Scheduler {
   }
 
   /**
+   * The stretch of the board frame from FRAME_LINE to vblank, where the
+   * main CPU's foreground runs BEFORE this frame's vblank handlers. Only
+   * work carried over from earlier frames can be in progress there; when it
+   * finishes in this stretch, what follows it on the Z80 (unless that is a
+   * `halt`) also happens before the handlers, so the port resumes it here.
+   */
+  preForeground() {
+    const m = this.m;
+    if (this.fgDebt === 0 || this.threads[CPU.MAIN] === null || this.inHandler[CPU.MAIN]) return;
+    if (this.fgDebt > PRE_SLOT_CYCLES) { this.fgDebt -= PRE_SLOT_CYCLES; return; }
+    const left = PRE_SLOT_CYCLES - this.fgDebt;
+    this.fgDebt = 0;
+    // A `halt` reached here wakes at this frame's interrupt: resume it in
+    // the normal slot, after the handlers.
+    if (this.lastYield[CPU.MAIN] === HALT) return;
+    const chargedBefore = m.charged;
+    this.resume(CPU.MAIN);
+    while (this.lastYield[CPU.MAIN] === BUSY && m.charged - chargedBefore <= left) this.resume(CPU.MAIN);
+    this.fgDebt = Math.max(0, m.charged - chargedBefore - left);
+    // Charged here, not by a handler: don't let the handler budget see it.
+    m.charged = chargedBefore;
+  }
+
+  /**
    * @param {number} n
    * @returns {boolean} true if the thread yielded SPIN
    */
@@ -385,13 +471,22 @@ export class Scheduler {
     // A CPU still inside an interrupt handler runs no foreground code.
     if (this.inHandler[n]) return false;
     if (t === null) return false;
-    const r = t.next();
+    let r;
+    try {
+      r = t.next();
+    } catch (e) {
+      if (!(e instanceof CpuHang)) throw e;
+      this.threads[n] = parked();
+      this.hung[n] = e.message;
+      return false;
+    }
     if (r.done) {
       // Foreground code on these boards never returns; if a port does, that
       // is a bug worth hearing about rather than a silently idle CPU.
       this.threads[n] = null;
       throw new Error(`CPU ${n} foreground returned`);
     }
+    this.lastYield[n] = r.value;
     return r.value === SPIN;
   }
 }

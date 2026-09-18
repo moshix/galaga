@@ -19,6 +19,7 @@
  * @see reference/neiderm/galag/galagao_ASxxx/rom0/gg1-3.s
  */
 
+import { CpuHang } from '../scheduler.js';
 import { romByte } from '../romdata.js';
 import { MAIN } from './routines.js';
 
@@ -134,7 +135,14 @@ export function c_25A2(m) {
     // l_2662_form_pair: "bb uu cc vv" for each U in slots 0-7 with its V
     // partner 8 slots on, until the first $FF.
     p = 0x9100;
-    for (;;) {
+    for (let pass = 0; ; pass += 1) {
+      // With no $FF among slots 0-7 the Z80 never leaves this loop: `set 3,l`
+      // / `res 3,l` / `inc hl` takes HL from $9107 to $9108 and then, since
+      // bit 3 is cleared again, back to $9101. It keeps rewriting the same
+      // 4-byte pattern around page $89 while interrupts carry on. Reachable
+      // only on the wrapped stage 0 at some ranks. After 256 passes the page
+      // holds that steady pattern; then the foreground is declared hung.
+      if (pass >= 256 && (p & 0xff) <= 0x08) throw new CpuHang('$2662 (l_2662_form_pair, stage 0)');
       m.poke((d << 8) | e, bb);
       const u = m.peek(p);
       if (u === 0xff) break;

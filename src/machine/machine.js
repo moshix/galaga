@@ -151,6 +151,14 @@ export class Machine {
    */
   charge(cycles) { this.charged += cycles; }
 
+  /**
+   * Deliberate departures from the ROM, all off by default. Only the page's
+   * settings turn them on; the tests always run with them off.
+   *   fastFire: the player's shots travel twice as fast (and so free the
+   *             two-shot limit sooner), like MAME's galagamf hack.
+   */
+  hacks = { fastFire: false };
+
   /** Writes performed, for the scheduler's "did anything happen" test. */
   writes = 0;
   watchdogKicks = 0;

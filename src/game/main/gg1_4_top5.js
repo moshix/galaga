@@ -322,17 +322,28 @@ export function* c_top5_dlg_proc(m) {
     c_plyr_initials_entry_hilite_line(m);
     let c = m.peek(0x92a0);
     let nextChar = false;
+    // The switch bytes as they were before this frame's vblank. On the board
+    // the handler starts the 51XX read ($71 at $02A3) as its last act and the
+    // bytes arrive by NMI about a thousand cycles later -- after this loop has
+    // already woken on the $92A0 tick and read $99B6. So the ROM always acts
+    // on the previous frame's switches; the port's read lands inside the
+    // handler, so it keeps its own copy from before the tick.
+    let stale = [m.peek(0x99b6), m.peek(0x99b7)];
     while (!nextChar) {
       // l_30BF_dlg_proc: poll the exit conditions, then wait for a frame.
       if (c_32ED_top5_dlg_endproc(m)) return;
       const a = m.peek(0x92a0);
-      if (a === c) { yield; continue; }
+      if (a === c) {
+        stale = [m.peek(0x99b6), m.peek(0x99b7)];
+        yield;
+        continue;
+      }
       c = a;
       if ((a & 0x0f) === 0) c_3141_xor_char_color(m); // blink 4x a second
       // Player 1's panel ($99B6), or player 2's ($99B7) when the cocktail
       // screen is flipped for player 2.
-      const inp = m.peek(0x9215) === 0 ? 0x99b6 : 0x99b7;
-      if (!(m.peek(inp) & 0x10)) {
+      const input = stale[m.peek(0x9215) === 0 ? 0 : 1];
+      if (!(input & 0x10)) {
         // j_314C_select_char: fire button (active low).
         if (!selectChar(m)) { nextChar = true; continue; }
         // Third initial accepted: show it, wait for the tune (the frame
@@ -345,7 +356,7 @@ export function* c_top5_dlg_proc(m) {
       }
       // 0x30DD: stick auto-repeat. A change of state restarts the counter
       // at $FD so the first step happens on the next frame ($FD+3 = $00).
-      const stick = m.peek(inp) & 0x0a;
+      const stick = input & 0x0a;
       if (stick !== m.peek(0x8a02)) {
         m.poke(0x8a02, stick);
         m.poke(0x8a03, 0xfd);

@@ -86,6 +86,13 @@ function detRcktLoop(m, l, b, e, ixl, ixh) {
  * @param {{ l: number, b: number, e: number, ixl: number, ixh: number }} regs
  *   L first object, B count, E rocket y offset (odd), IXL x, IXH y<8:1>
  */
+/**
+ * Shot speed with the fast-fire hack on: twice the ROM's 6 pixels a frame.
+ * Not from a ROM dump -- galagamf's patched sub-CPU ROM is not part of this
+ * project -- so treat it as "a faster shot", not as that set.
+ */
+export const FAST_SHOT_SPEED = 12;
+
 export function hitd_det_rckt(m, { l, b, e, ixl, ixh }) {
   detRcktLoop(m, l & 0xff, b & 0xff, e & 0xff, ixl, ixh);
 }
@@ -325,9 +332,14 @@ export function rckt_man(m, { de, hl }) {
   let l = hl & 0xff;
   if (m.peek(0x9300 + l) === 0) return;
   const b = m.peek(de);
-  let dx = 6;
+  // $070C: ld a,$06 -- the shot's speed along its main axis, pixels a frame.
+  // The optional fast-fire hack (Machine.hacks.fastFire, off by default)
+  // raises it, in the spirit of MAME's galagamf, whose only change is a
+  // patched sub-CPU ROM.
+  const speed = m.hacks.fastFire ? FAST_SHOT_SPEED : 6;
+  let dx = speed;
   let dy = b & 7;
-  if (b & 0x80) { dx = b & 7; dy = 6; } // ex af,af' swaps the two
+  if (b & 0x80) { dx = b & 7; dy = speed; } // ex af,af' swaps the two
   if (b & 0x40) dx = (-dx) & 0xff;
   const x = (dx + m.peek(0x9300 + l)) & 0xff;
   m.poke(0x9300 + l, x);

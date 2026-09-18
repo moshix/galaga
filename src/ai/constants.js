@@ -153,7 +153,7 @@ export const W_NEAR = 40;
 /** Per pixel of travel: prefer the nearer of two equal spots. */
 export const W_COST = 0.2;
 /** Room from the walls, capped: walk off a wall, but no need for the middle. */
-export const W_ROOM = 6;
+export const W_ROOM = 12;
 export const ROOM_CAP = 24;
 /** Being under something worth shooting. */
 export const W_AIM = 200;

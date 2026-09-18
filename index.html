@@ -75,6 +75,24 @@
     letter-spacing: .04em; pointer-events: none; user-select: none;
   }
   @media (max-width: 560px) { #version { position: static; } }
+  /*
+   * Settings bar: real toggle buttons (aria-pressed), each with the key that
+   * does the same thing. A pressed toggle lights up like the AI indicator.
+   */
+  #settings { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; max-width: 560px; }
+  #settings button {
+    background: #111; color: #9a9a9a; font: inherit; letter-spacing: .04em;
+    border: 1px solid #2e2e2e; border-radius: 4px; padding: 3px 9px; cursor: pointer;
+    transition: color .15s, background-color .15s, border-color .15s;
+  }
+  #settings button:hover { border-color: #555; color: #cfcfcf; }
+  #settings button:focus-visible { outline: 1px solid #8fd18f; outline-offset: 1px; }
+  #settings button[aria-pressed="true"] {
+    color: #bfe2ff; border-color: rgba(124, 196, 255, .55); background: rgba(124, 196, 255, .10);
+  }
+  #settings button[aria-pressed="true"] kbd { border-color: rgba(124, 196, 255, .6); color: #dff0ff; }
+  #settings .note { opacity: .55; }
+  @media (prefers-reduced-motion: reduce) { #settings button { transition: none; } }
   kbd {
     background: #1b1b1b; border: 1px solid #333; border-radius: 3px;
     padding: 0 4px; font: inherit;
@@ -216,9 +234,17 @@
     <kbd>5</kbd> coin &nbsp;·&nbsp; <kbd>1</kbd>/<kbd>2</kbd> start &nbsp;·&nbsp;
     <span id="ai-hint"><kbd>A</kbd> self-playing AI</span> &nbsp;·&nbsp;
     <kbd>P</kbd> pause &nbsp;·&nbsp;
-    <kbd>M</kbd> sound &nbsp;·&nbsp;
+    <kbd>M</kbd> sound &nbsp;·&nbsp; <kbd>F</kbd> fast fire &nbsp;·&nbsp;
     <kbd>+</kbd>/<kbd>-</kbd> zoom &nbsp;·&nbsp;
     <kbd>G</kbd> <button type="button" class="link" id="openremap">joystick</button>
+  </div>
+  <div id="settings" role="group" aria-label="Settings">
+    <button type="button" id="set-ai" aria-pressed="false"><kbd>A</kbd> AI player</button>
+    <button type="button" id="set-fast" aria-pressed="false"
+      title="Shots travel twice as fast, like MAME's galagamf fast-shoot hack. Not the original game."
+    ><kbd>F</kbd> fast fire <span class="note">(hack)</span></button>
+    <button type="button" id="set-sound" aria-pressed="true"><kbd>M</kbd> sound</button>
+    <button type="button" id="set-joy"><kbd>G</kbd> joystick&hellip;</button>
   </div>
 
   <dialog id="remap" aria-labelledby="remaptitle">
