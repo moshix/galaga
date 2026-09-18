@@ -25,6 +25,7 @@
  *   node tools/ai-bench.mjs --target=port
  *   node tools/ai-bench.mjs --json
  *   node tools/ai-bench.mjs --fixed-delay=2     don't measure the input latency
+ *   node tools/ai-bench.mjs --no-dual           never go for the dual fighter
  */
 
 import { AutoPlayer } from '../src/ai/autoplay.js';
@@ -107,6 +108,8 @@ export function readScore(peek) {
  * @property {number} score
  * @property {number} deaths   fighters lost (including captures)
  * @property {number} captures fighters taken by the tractor beam
+ * @property {number} rescues  captured fighters shot free (task f_2000 starts)
+ * @property {number} dualFrames frames played as the dual fighter
  * @property {number[]} deathFrames
  * @property {boolean} capped  stopped by the frame cap, not by game over
  * @property {number} aiMs     mean AI time per frame, milliseconds
@@ -129,7 +132,7 @@ const JITTER_FRAMES = 6;
  * @param {number} preRoll attract frames before the AI takes over
  * @param {number} frameCap
  * @param {(t: Target, frame: number, event: string) => void} [onEvent]
- * @param {{delay?: number}} [aiOptions] passed to the AutoPlayer
+ * @param {{delay?: number, dualFighter?: boolean}} [aiOptions] for the AutoPlayer
  * @returns {GameResult}
  */
 export function playOneGame(t, preRoll, frameCap, onEvent, aiOptions = {}) {
@@ -142,6 +145,9 @@ export function playOneGame(t, preRoll, frameCap, onEvent, aiOptions = {}) {
   let deaths = 0;
   let captures = 0;
   let wasCapturing = false;
+  let rescues = 0;
+  let wasRescuing = false;
+  let dualFrames = 0;
   let wasLive = false;
   const deathFrames = [];
   let capped = true;
@@ -188,6 +194,10 @@ export function playOneGame(t, preRoll, frameCap, onEvent, aiOptions = {}) {
       onEvent?.(t, frames, 'capture');
     }
     wasCapturing = capturing;
+    // A rescue: task f_2000 ($901D) spins the freed fighter down to dock.
+    const rescuing = t.peek(0x901d) !== 0;
+    if (rescuing && !wasRescuing) rescues += 1;
+    wasRescuing = rescuing;
     // The fighter's collision task stops the frame it is hit.
     const live = t.peek(0x9014) !== 0;
     // Jitter: count changes of the fighter's direction of travel. Frames
@@ -196,6 +206,7 @@ export function playOneGame(t, preRoll, frameCap, onEvent, aiOptions = {}) {
     if (live) {
       const x = t.peek(0x9362);
       moveFrames += 1;
+      if ((t.peek(0x9827) & 1) !== 0) dualFrames += 1;
       if (lastX >= 0 && x !== lastX) {
         const dir = Math.sign(x - lastX);
         if (lastDir !== 0 && dir !== lastDir) {
@@ -214,7 +225,7 @@ export function playOneGame(t, preRoll, frameCap, onEvent, aiOptions = {}) {
     wasLive = live;
   }
   return {
-    frames, stage, score: readScore(t.peek), deaths, captures, deathFrames, capped,
+    frames, stage, score: readScore(t.peek), deaths, captures, rescues, dualFrames, deathFrames, capped,
     aiMs: aiTime / Math.max(1, aiFrames), moveFrames, reversals, jitters,
   };
 }
@@ -248,7 +259,10 @@ async function main() {
   const verbose = argv.includes('--verbose');
   // Debugging aid: fix the AI's input latency instead of letting it measure.
   const fixedDelay = option(argv, 'fixed-delay', '');
+  /** @type {{delay?: number, dualFighter?: boolean}} */
   const aiOptions = fixedDelay === '' ? {} : { delay: Number.parseInt(fixedDelay, 10) };
+  // --no-dual: never go for the dual fighter (avoid every tractor beam).
+  if (argv.includes('--no-dual')) aiOptions.dualFighter = false;
   const asJson = argv.includes('--json');
   if (!Number.isFinite(runs) || runs < 1) {
     console.error('--runs needs a positive integer');
@@ -279,7 +293,8 @@ async function main() {
       const r = results[results.length - 1];
       console.log(`  run ${String(r.run).padStart(3)}  frames ${String(r.frames).padStart(7)}`
         + `  stage ${String(r.stage).padStart(3)}  score ${String(r.score).padStart(7)}`
-        + `  deaths ${r.deaths} (capt ${r.captures})  at ${r.deathFrames.join(',')}`
+        + `  deaths ${r.deaths} (capt ${r.captures} resc ${r.rescues} dual ${r.dualFrames})`
+        + `  at ${r.deathFrames.join(',')}`
         + `  rev/1k ${(1000 * r.reversals / Math.max(1, r.moveFrames)).toFixed(1)}`
         + ` (jitter ${(1000 * r.jitters / Math.max(1, r.moveFrames)).toFixed(1)})`
         + `${r.capped ? '  [cap]' : ''}  ${(r.ms / 1000).toFixed(0)}s  ai ${r.aiMs.toFixed(3)}ms`);
@@ -301,7 +316,11 @@ async function main() {
   console.log(`  score            median ${fmt(median(results.map((r) => r.score)))}`
     + `  best ${Math.max(...results.map((r) => r.score))}`);
   console.log(`  deaths per game  mean ${fmt(mean(results.map((r) => r.deaths)))}`
-    + `  (captures ${fmt(mean(results.map((r) => r.captures)))})`);
+    + `  (of which captures ${fmt(mean(results.map((r) => r.captures)))})`);
+  const dual = results.reduce((a, r) => a + r.dualFrames, 0);
+  const played = results.reduce((a, r) => a + r.moveFrames, 0);
+  console.log(`  dual fighter     rescues ${fmt(mean(results.map((r) => r.rescues)))} per game,`
+    + ` ${(100 * dual / Math.max(1, played)).toFixed(1)}% of play as the dual fighter`);
   const moved = results.reduce((a, r) => a + r.moveFrames, 0);
   const perK = (n) => (1000 * n / Math.max(1, moved)).toFixed(1);
   console.log(`  reversals        ${perK(results.reduce((a, r) => a + r.reversals, 0))} per 1000 frames`

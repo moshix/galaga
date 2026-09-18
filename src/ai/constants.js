@@ -148,8 +148,15 @@ export const MOTION_SLOT_SIZE = 0x14;
 export const W_SURVIVAL = 1000;
 /** Per lethal frame after the first: fewer is better even when all die. */
 export const W_HITS = 50;
-/** Per frame spent inside the soft margin around a threat. */
+/**
+ * Per frame spent inside the soft margin around a threat, counted up to
+ * NEAR_CAP frames. The cap matters: uncapped, a busy screen makes every
+ * spot in the middle "near" for dozens of frames, and the only quiet place
+ * left is against a wall -- which is exactly where aimed bombs trap the
+ * fighter, since it can only get away in one direction.
+ */
 export const W_NEAR = 40;
+export const NEAR_CAP = 64;
 /** Per pixel of travel: prefer the nearer of two equal spots. */
 export const W_COST = 0.2;
 /** Room from the walls, capped: walk off a wall, but no need for the middle. */

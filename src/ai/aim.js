@@ -44,11 +44,15 @@ const AIM_SPREAD = 3;
  * @param {number} shipX
  * @param {import('./paths.js').Track[]} tracks
  * @param {number} count bombs (kind 0) in the list are ignored
+ * @param {Float32Array | null} [weights] per object: 0 never shoot it, 1
+ *   normal, more to prefer it (see autoplay.js on the captured fighter)
  */
-export function buildAimMap(aim, shipX, tracks, count) {
+export function buildAimMap(aim, shipX, tracks, count, weights = null) {
   for (let i = 0; i < count; i += 1) {
     const t = tracks[i];
     if (t.kind === 0 || t.last < 1) continue;
+    const weight = weights === null ? 1 : weights[t.obj];
+    if (weight === 0) continue;
     let x = t.x[0];
     let k = 0;
     for (let iter = 0; iter < 3; iter += 1) {
@@ -63,7 +67,7 @@ export function buildAimMap(aim, shipX, tracks, count) {
     if (t.y[k] >= FIGHTER_Y - 8) continue;
     const base = t.kind === 2 ? VALUE_FORMATION : VALUE_FLYER;
     // Sooner is better: a far-future shot is a weak promise.
-    const value = base * (1 - Math.min(0.5, k / 160));
+    const value = weight * base * (1 - Math.min(0.5, k / 160));
     for (let d = -AIM_SPREAD; d <= AIM_SPREAD; d += 1) {
       const c = x + d;
       if (c < 0 || c > 255) continue;
@@ -77,18 +81,22 @@ export function buildAimMap(aim, shipX, tracks, count) {
  * Would a rocket fired now hit something?
  *
  * @param {number} rocketX the fighter's x on the frame the rocket appears
+ * @param {number} k0 the frame the rocket appears (the host's fire delay)
  * @param {import('./paths.js').Track[]} tracks
  * @param {number} count bombs (kind 0) cannot be shot and are ignored
  * @param {number} tolerance aim error allowed, pixels
- * @returns {number} index of the track hit soonest, or -1
+ * @param {Float32Array | null} [weights] objects with weight 0 are not shot
+ * @returns {{index: number, frame: number}} the track hit soonest (index
+ *   -1 if none) and the frame of the impact
  */
-export function chooseShot(rocketX, tracks, count, tolerance) {
+export function chooseShot(rocketX, k0, tracks, count, tolerance, weights = null) {
   let best = -1;
   let bestFrame = Infinity;
   for (let i = 0; i < count; i += 1) {
     if (tracks[i].kind === 0) continue;
-    const k = rocketHits(rocketX, FIRE_DELAY, tracks[i], tolerance);
+    if (weights !== null && weights[tracks[i].obj] === 0) continue;
+    const k = rocketHits(rocketX, k0, tracks[i], tolerance);
     if (k >= 0 && k < bestFrame) { bestFrame = k; best = i; }
   }
-  return best;
+  return { index: best, frame: bestFrame };
 }

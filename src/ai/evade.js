@@ -39,13 +39,11 @@ import { planShip, inFighterBand, xRange } from './paths.js';
 import {
   HIT_HALF_X, MARGIN_X, DUAL_OFFSET, NEAR_MARGIN, BEAM_LEFT, BEAM_RIGHT, BEAM_MARGIN,
   W_SURVIVAL, W_HITS, W_NEAR, W_COST, W_ROOM, ROOM_CAP, W_AIM, W_HOLD, HOLD_MARGIN,
-  REVERSE_MARGIN, SAFETY_GAIN, URGENT_FRAMES, DEAD_BAND,
+  REVERSE_MARGIN, SAFETY_GAIN, URGENT_FRAMES, DEAD_BAND, NEAR_CAP,
 } from './constants.js';
 
 /** Threat bits 0..29 are tracks; this one is the tractor beam. */
 export const BEAM_BIT = 30;
-/** Most threats one map can tell apart. */
-export const MAX_THREAT_BITS = 30;
 
 /**
  * A danger map for frames 0..horizon, indexed `k * 256 + x`.
@@ -249,13 +247,12 @@ let planScratch = new Int16Array(0);
  *    SAFETY_GAIN frames longer (or right through the horizon), or any
  *    change when the held plan dies within URGENT_FRAMES, is.
  *  - A new target within DEAD_BAND pixels of where the fighter stands is
- *    not worth a move: stay, unless staying is less safe.
- *  - Straight after turning round (state.noTurn), targets that would need
- *    another turn are out of bounds unless the course the fighter is on
- *    dies within 2 * URGENT_FRAMES and the turn would not. This lives here
- *    rather than as a veto on the stick, so the plan and the stick agree:
- *    a veto after the fact leaves the fighter standing still between two
- *    targets it keeps being told to go to.
+ *    not worth a move: stay, unless staying is less safe or clearly worse
+ *    (standing a pixel outside a target's window is not "near enough").
+ *  - The stick itself is steadied in autoplay.js (steady()): no reversal
+ *    straight after another unless `urgent`, which this function reports.
+ *    (Folding that rule into the search as a hard constraint was tried; it
+ *    kept the fighter on doomed courses and doubled the losses.)
  *
  * @param {object} state
  * @param {number} state.x      fighter x now
@@ -263,8 +260,6 @@ let planScratch = new Int16Array(0);
  * @param {ArrayLike<number>} state.queued directions already sent
  * @param {boolean} state.dual
  * @param {number} [state.lastDir] last direction the fighter was sent, -1/0/+1
- * @param {boolean} [state.noTurn] the fighter turned round, or pushed the
- *   other way, too recently to turn again without a reason
  * @param {DangerMap} map
  * @param {Float32Array | null} aim value of standing at each x, 0..1
  * @param {number} held last frame's target, or -1
@@ -277,7 +272,6 @@ export function chooseMove(state, map, aim, held, canKill = null) {
   const plan = planScratch;
   const [lo, hi] = xRange(state.dual);
   const lastDir = state.lastDir ?? 0;
-  const noTurn = state.noTurn === true && lastDir !== 0;
   /** Would heading for x mean turning round? @param {number} x */
   const turns = (x) => {
     const d = Math.sign(x - state.x);
@@ -285,40 +279,27 @@ export function chooseMove(state, map, aim, held, canKill = null) {
   };
 
   let best = null;
-  let bestKeep = null;
   let heldMove = null;
   let stay = null;
   for (let c = lo; c <= hi; c += 1) {
     const dir = planShip(state.x, state.flag, state.queued, c, state.dual, h, plan);
     const { tDeath, near, hits, kills } = evaluateWithKills(map, plan, canKill);
     const room = Math.min(c - lo, hi - c, ROOM_CAP);
-    let score = W_SURVIVAL * tDeath - W_HITS * hits - W_NEAR * near
+    let score = W_SURVIVAL * tDeath - W_HITS * hits - W_NEAR * Math.min(near, NEAR_CAP)
       - W_COST * Math.abs(c - state.x) + W_ROOM * room;
     if (aim !== null) score += W_AIM * aim[c];
     if (c === held) score += W_HOLD;
-    const keeps = !turns(c);
-    if (c === held || c === state.x || best === null || score > best.score
-        || (keeps && (bestKeep === null || score > bestKeep.score))) {
+    if (c === held || c === state.x || best === null || score > best.score) {
       const move = { target: c, dir, tDeath, score, kills, urgent: false };
       if (c === held) heldMove = move;
       if (c === state.x) stay = move;
       if (best === null || score > best.score) best = move;
-      if (keeps && (bestKeep === null || score > bestKeep.score)) bestKeep = move;
     }
   }
   if (best === null) return { target: state.x, dir: 0, tDeath: 0, score: 0, kills: 0, urgent: true };
 
-  // Just turned round, or still pushing the other way: stay on course
-  // unless the course itself is about to die and turning would not.
-  let forced = false;
-  if (noTurn && bestKeep !== null && turns(best.target)) {
-    if (best.tDeath > bestKeep.tDeath && bestKeep.tDeath <= 2 * URGENT_FRAMES) forced = true;
-    else best = bestKeep;
-  }
-  if (heldMove !== null && noTurn && turns(heldMove.target)) heldMove = null;
-
   let choice = best;
-  if (!forced && heldMove !== null && best !== heldMove) {
+  if (heldMove !== null && best !== heldMove) {
     if (best.tDeath > heldMove.tDeath) {
       // Safer. Take it if the difference is real, or the held plan is
       // about to die anyway.
@@ -333,13 +314,13 @@ export function chooseMove(state, map, aim, held, canKill = null) {
     }
   }
   // Dead band: a small step for a small gain is just a twitch.
-  if (!forced && stay !== null && choice !== stay
-      && Math.abs(choice.target - state.x) <= DEAD_BAND && stay.tDeath >= choice.tDeath) {
+  if (stay !== null && choice !== stay && Math.abs(choice.target - state.x) <= DEAD_BAND
+      && stay.tDeath >= choice.tDeath && stay.score >= choice.score - HOLD_MARGIN) {
     choice = stay;
   }
   // Urgent: the course the fighter is on would die soon; a sharp turn is
   // then allowed even straight after another.
-  choice.urgent = forced || (heldMove !== null ? heldMove.tDeath : choice.tDeath) <= URGENT_FRAMES
+  choice.urgent = (heldMove !== null ? heldMove.tDeath : choice.tDeath) <= URGENT_FRAMES
     || choice.tDeath <= URGENT_FRAMES;
   return choice;
 }

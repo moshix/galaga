@@ -51,6 +51,13 @@ import {
  * @property {number} beamFrom   first frame index on which the beam could
  *                               catch the fighter
  * @property {number} rocketsFree rocket slots with x = 0
+ * @property {number} captureBoss object of the boss diving to beam or
+ *                               beaming ($9828), or -1
+ * @property {number} captive    our captured fighter, held by a boss: its
+ *                               object ($00-$06, sprite colour 7), or -1
+ * @property {number} holder     the boss holding it ($30 + captive), or -1
+ * @property {boolean} rescuing  task f_2000 ($901D): a rescued fighter is
+ *                               spinning down to dock
  */
 
 /**
@@ -92,6 +99,7 @@ export class ThreatReader {
       gameState: 0, credits: 0, canMove: false, canFire: false, x: 0, flag: 0, dual: false,
       counter: 0, runnerLeft: 0, challenge: false, launching: false, stage: 0, ships: 0,
       beam: false, beamX: 0, beamFrom: 1, rocketsFree: 0,
+      captureBoss: -1, captive: -1, holder: -1, rescuing: false,
     };
     this.env = makeFlightEnv();
     this.flight = makeFlight();
@@ -111,8 +119,6 @@ export class ThreatReader {
     /** Formation x history, one ring per object, for the drift estimate. */
     this.history = new Int16Array(48 * DRIFT_FRAMES).fill(-1);
     this.historyAt = 0;
-    /** Scratch for bomb-drop frames, unused by default. */
-    this.drops = new Uint8Array(horizon + 2);
   }
 
   /**
@@ -146,6 +152,20 @@ export class ThreatReader {
     let free = 0;
     for (const l of ROCKET_SLOTS) if (m.peek(0x9300 + l) === 0) free += 1;
     w.rocketsFree = free;
+    w.captureBoss = w.beam ? m.peek(0x9828) : -1;
+    // A captured fighter is an ordinary enemy object with the fighter's
+    // sprite in colour 7 (hitd_dspchr treats colour 7 as "captured ship").
+    // It rides on the boss whose object is $30 + its own (l_081E: the boss
+    // at L holds object L & 7).
+    w.captive = -1;
+    for (let l = 0; l <= 6; l += 2) {
+      if ((m.peek(0x8800 + l) & 0x80) === 0 && (m.peek(0x8b01 + l) & 0x0f) === 7) {
+        w.captive = l;
+        break;
+      }
+    }
+    w.holder = w.captive >= 0 ? 0x30 + w.captive : -1;
+    w.rescuing = m.peek(0x901d) !== 0;
 
     const e = this.env;
     e.fighterX = w.x;

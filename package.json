@@ -1,6 +1,6 @@
 {
   "name": "galaga-1981",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Routine-by-routine JavaScript port of Namco's Galaga (1981, rev. B), with a self-playing AI and a three-Z80 differential test oracle",
   "type": "module",
@@ -10,7 +10,7 @@
     "test:unit": "node --test \"test/unit/*.test.mjs\"",
     "test:oracle": "node --test \"test/oracle/*.test.mjs\"",
     "listing": "node tools/gen-listing.mjs",
-    "gen": "node tools/gen-listing.mjs && node tools/gen-graphics.mjs && node tools/gen-sound.mjs && node tools/gen-index.mjs"
+    "gen": "node tools/gen-listing.mjs && node tools/gen-graphics.mjs && node tools/gen-sound.mjs && node tools/gen-favicon.mjs && node tools/gen-index.mjs"
   },
   "engines": {
     "node": ">=20"

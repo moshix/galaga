@@ -31,7 +31,7 @@
  * an upright cabinet, where $9215 is always 0.
  */
 
-import { subRom, romWord } from '../game/romdata.js';
+import { subRom } from '../game/romdata.js';
 
 /**
  * RAM values the path commands read, sampled once per frame.
@@ -92,16 +92,6 @@ export function loadFlight(f, peek, slot, status) {
   f.y = peek(0x9301 + obj) | ((peek(0x9b01 + obj) & 1) << 8);
 }
 
-/** Copy one flight into another (for branching predictions). @param {Flight} dst @param {Flight} src */
-export function copyFlight(dst, src) {
-  dst.s.set(src.s);
-  dst.status = src.status;
-  dst.alive = src.alive;
-  dst.x = src.x;
-  dst.y = src.y;
-  dst.dropped = src.dropped;
-}
-
 /**
  * A byte of the sub CPU's address space. Path data lives in ROM; a pointer
  * outside it (never seen in play) reads as the end-of-path token.
@@ -137,7 +127,18 @@ export function divide(a, hl) {
   let q = hl & 0xffff;
   for (let b = 0x11; b > 0; b -= 1) {
     const t = (acc << 1) | cf;
-    if (t > 0xff) { acc = (t - c) & 0xff; cf = 1; } else if (t < c) { acc = t; cf = 0; } else { acc = t - c; cf = 1; }
+    // One restoring step: subtract when it fits (or the shifted-out bit
+    // says it must), and the carry becomes the next quotient bit.
+    if (t > 0xff) {
+      acc = (t - c) & 0xff;
+      cf = 1;
+    } else if (t < c) {
+      acc = t;
+      cf = 0;
+    } else {
+      acc = t - c;
+      cf = 1;
+    }
     const r = (q << 1) | cf;
     q = r & 0xffff;
     cf = r >> 16;
@@ -480,9 +481,4 @@ export function stepFlight(f, env, parity) {
   spritePosition(f);
   bombTimer(f, env);
   return true;
-}
-
-/** For tests: the jump-table address a command token dispatches to. @param {number} token */
-export function commandTarget(token) {
-  return romWord('sub', 0x0920 + (((~token) & 0xff) << 1));
 }

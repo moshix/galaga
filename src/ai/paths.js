@@ -16,7 +16,7 @@
 import { stepFlight } from './flight.js';
 import {
   FIGHTER_YH, X_MIN, X_MAX, X_MAX_DUAL, RIGHT_LIMIT, RIGHT_LIMIT_DUAL, LEFT_LIMIT,
-  ROCKET_SPEED, ROCKET_HIT_DX, ROCKET_HIT_DYH_LO, ROCKET_HIT_DYH_HI, FIGHTER_Y,
+  ROCKET_SPEED, ROCKET_HIT_DYH_LO, ROCKET_HIT_DYH_HI, FIGHTER_Y,
 } from './constants.js';
 
 /**
@@ -259,6 +259,3 @@ export function rocketHits(rx, k0, t, tolerance) {
   }
   return impact;
 }
-
-/** The rocket's hit half-width, re-exported for the fire policy. */
-export const ROCKET_HALF = ROCKET_HIT_DX;
