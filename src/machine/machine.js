@@ -136,6 +136,21 @@ export class Machine {
     return (x ^ (x >> 7)) & 0x7f;
   }
 
+  /**
+   * CPU time charged by the few routines long enough for it to matter, in
+   * Z80 cycles, since the scheduler last reset it. A routine-level port has
+   * no clock; this exists for the one place the ROM's behaviour depends on
+   * how long something took: a vblank handler that runs past the next
+   * vblank makes the board miss that interrupt. @see Scheduler.stepFrame
+   */
+  charged = 0;
+
+  /**
+   * Charge measured CPU time. @see charged
+   * @param {number} cycles
+   */
+  charge(cycles) { this.charged += cycles; }
+
   /** Writes performed, for the scheduler's "did anything happen" test. */
   writes = 0;
   watchdogKicks = 0;

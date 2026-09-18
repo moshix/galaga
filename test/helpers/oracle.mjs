@@ -99,9 +99,11 @@ export const RAM_REGIONS = Object.freeze([
 
 /**
  * Z80 stacks live in shared RAM: meaningless for the port, which has none.
- * $9030-$90FF: main ($90A0 down) and sub ($9100 down); $9AE0-$9AFF: sound.
+ * $9030-$90FF: main ($90A0 down) and sub ($9100 down); $9AE0-$9AFF: sound;
+ * $8AE0-$8AFF: the temporary stack the self test runs on ($8B00 down), which
+ * the IRQ handler also pushes to while it is in use.
  */
-export const STACK_RANGES = Object.freeze([[0x9030, 0x9100], [0x9ae0, 0x9b00]]);
+export const STACK_RANGES = Object.freeze([[0x9030, 0x9100], [0x9ae0, 0x9b00], [0x8ae0, 0x8b00]]);
 
 /**
  * @typedef {{ video: Uint8Array, ram1: Uint8Array, ram2: Uint8Array, ram3: Uint8Array }} RamOwner

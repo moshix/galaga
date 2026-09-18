@@ -1,6 +1,6 @@
 {
   "name": "galaga-1981",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Routine-by-routine JavaScript port of Namco's Galaga (1981, rev. B), with a self-playing AI and a three-Z80 differential test oracle",
   "type": "module",

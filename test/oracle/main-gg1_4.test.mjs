@@ -11,7 +11,7 @@
  * the main CPU's IRQ and NMI handlers) is recorded with its cycle and
  * replayed into the port at the start of the port frame it belongs to. The
  * port runs only the jp_RAM_test generator; after every frame its RAM must
- * equal the oracle's at the lock-step sampling point (line 63 of the next
+ * equal the oracle's at the lock-step sampling point (line FRAME_LINE of the next
  * frame, test/helpers/lockstep.mjs), and it must reach j_Game_init in the
  * same frame with the same RAM.
  */
@@ -23,7 +23,7 @@ import {
 import { CYCLES_PER_FRAME, CYCLES_PER_LINE } from '../z80/machine.mjs';
 import { Machine } from '../../src/machine/machine.js';
 import { IoBus } from '../../src/game/io.js';
-import { SPIN } from '../../src/game/scheduler.js';
+import { SPIN, FRAME_LINE } from '../../src/game/scheduler.js';
 import { Namco51 } from '../../src/machine/namco51.js';
 import '../../src/game/main/index.js';
 import { MAIN } from '../../src/game/main/routines.js';
@@ -501,7 +501,7 @@ test('j_ramtest_ng ($34CA) and j_romtest_ng ($353F) error screens', () => {
 
 // ------------------------------------------------------------- the boot
 
-/** The lock-step sample point: line 63 of frame k. */
+/** The lock-step sample point: line FRAME_LINE of frame k. */
 const B = (k) => k * CYCLES_PER_FRAME + FRAME_ORIGIN;
 /** Vblank k (line 224 of frame k). */
 const V = (k) => k * CYCLES_PER_FRAME + 224 * CYCLES_PER_LINE;
@@ -517,7 +517,7 @@ const STACKISH = (a) => (a >= 0x83f0 && a < 0x8400) || (a >= 0x8ae0 && a < 0x8b0
  * Boot the oracle from power-on to j_Game_init, recording every RAM write
  * with its cycle, split into the main CPU's foreground writes and all the
  * others (sub and sound CPUs, main CPU interrupt handlers), plus the RAM at
- * every line 63 and vblank, and at $02D3.
+ * every FRAME_LINE and vblank, and at $02D3.
  * @param {(board: object, frame: number) => void} [inputs] per-frame input
  *   script (called at each frame start)
  * @param {[number, number] | null} [dsw] DSWA, DSWB
@@ -549,7 +549,7 @@ async function recordBoot(inputs = () => {}, dsw = null, entry = 1) {
   b.onExec = (n, pc, cpu) => {
     if (n !== 0) return;
     if (cpu.pc === 0x336c && (entries += 1) === entry) {
-      // The port frame this lands in (line-63 windows), and the RAM then.
+      // The port frame this lands in (FRAME_LINE windows), and the RAM then.
       startFrame = Math.floor((b.cpuTime[0] - FRAME_ORIGIN) / CYCLES_PER_FRAME);
       if (b.cpuTime[0] < B(1)) startFrame = 0;
       startRam = snap();
@@ -583,7 +583,7 @@ async function recordBoot(inputs = () => {}, dsw = null, entry = 1) {
  * whose RAM side is the oracle's NMI handler) must be the oracle's next
  * main-foreground write, and all other writes older than it are applied
  * first. After each frame the port RAM must equal the oracle's at the end
- * of the frame's window (line 63 while the main CPU is alone, vblank once
+ * of the frame's window (line FRAME_LINE while the main CPU is alone, vblank once
  * the sub CPUs run -- see Clock in gg1_4_post.js), and the port must have
  * made exactly the writes the Z80 made in that window.
  * @returns {{ frames: number, diffs: string[] }}
@@ -678,7 +678,7 @@ test('boot: every frame of the self test matches the oracle, default switches', 
   const { frames, diffs } = replayBoot(rec);
   assert.deepEqual(diffs, []);
   assert.equal(frames, expected, 'frame of the jump to j_Game_init');
-  assert.equal(BOOT_ENTRY_CYCLE, 480 - 63 * CYCLES_PER_LINE);
+  assert.equal(BOOT_ENTRY_CYCLE, 480 - FRAME_LINE * CYCLES_PER_LINE);
 });
 
 /**

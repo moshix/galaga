@@ -21,7 +21,7 @@ import {
   rst_08, rst_HLplusA, rst_18, rst_DEminus20, rst_28, rst_30,
   c_task_switcher, c_sctrl_sprite_ram_clr,
 } from './gg1_1_rst.js';
-import { main_reset, main_irq, CPU0_RESET } from './gg1_1_irq.js';
+import { main_reset, main_irq, main_irq_steps, CPU0_RESET } from './gg1_1_irq.js';
 import {
   f_0827, f_0828, f_0857, c_08AD, c_08BE, f_0935, c_093C, c_095F, f_0977,
 } from './gg1_1_tasks.js';
@@ -40,7 +40,7 @@ import {
 
 Object.assign(MAIN, {
   // Entry points the CPU ports use (see index.js).
-  main_reset, main_irq,
+  main_reset, main_irq, main_irq_steps,
   // RST helpers under their listing labels, plus plain aliases.
   rst_08, rst_HLplusA, rst_10: rst_HLplusA, l_0018: rst_18, rst_18,
   rst_DEminus20, rst_20: rst_DEminus20, rst_28, rst_30,

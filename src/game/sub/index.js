@@ -8,5 +8,5 @@ export const subCpu = {
   /** Reset vector $0000. */
   reset: (m) => SUB.sub_reset(m),
   /** IM 1 vector $0038. */
-  irq: (m) => SUB.sub_irq(m),
+  irq: (m) => SUB.sub_irq_steps(m),
 };

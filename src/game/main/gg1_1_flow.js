@@ -66,12 +66,25 @@ export function c_textout_1uphighscore_onetime(m) {
  * @returns {{ a: number, b: number, hl: number }}
  */
 export function c_sctrl_playfld_clr(m) {
+  // Two 895-byte ldirs: 39,394 cycles on the oracle, most of a frame. When
+  // the attract sequencer calls this from inside the vblank IRQ (f_17B2
+  // states 0 and 6) the handler overruns the next vblank; see the scheduler.
+  m.charge(PLAYFLD_CLR_CYCLES);
   // ld (hl),$24 / ldir: a smearing copy, i.e. a fill in ascending order.
   for (let i = 0; i <= 0x37f; i += 1) m.poke(0x8040 + i, 0x24);
   for (let i = 0; i <= 0x37f; i += 1) m.poke(0x8440 + i, 0x00);
   const r = rst_18(m, { a: 0x04, b: 0x20, hl: 0x87bf });
   return rst_18(m, { a: 0x4e, b: 0x20, hl: r.hl });
 }
+
+/**
+ * Measured costs, in Z80 cycles, of the routines long enough to change what
+ * the other CPU sees (in-game, on the oracle: call to return).
+ * @see Machine.charge, src/game/scheduler.js
+ */
+export const PLAYFLD_CLR_CYCLES = 39384;
+/** stg_init_env ($01C5), as the attract sequencer calls it. */
+export const STG_INIT_ENV_CYCLES = 18296;
 
 /**
  * $043D c_game_bonus_info_show_line: one line of the bonus info on the
@@ -170,6 +183,7 @@ function stgInitEnvBody(m) {
  * @param {Machine} m
  */
 export function stg_init_env(m) {
+  m.charge(STG_INIT_ENV_CYCLES);
   if (stgInitEnvBody(m)) {
     throw new Error('stg_init_env: rack advance from interrupt context -- '
       + 'the Z80 hangs here until the watchdog resets it');

@@ -92,9 +92,26 @@ explicitly, with a note explaining why.
 
 **Two CPUs meet in the middle every frame.** At vblank the main CPU and the
 enemy CPU each copy half of the sprite list to the video hardware, then wait
-for each other. On the board they really do run at the same time. The port
-runs them one after the other in a fixed order, and that handshake is what
-makes a fixed order safe.
+for each other. Only after that does the enemy CPU move anything. Getting
+this wrong is subtle: if the port lets the enemy CPU go first, the main CPU
+copies positions that have already moved, and nothing looks wrong until the
+enemies start diving.
+
+**Three CPUs racing each other is where "byte for byte" runs out.** After
+that meeting point the two CPUs really do work at the same time on the same
+RAM. Whether an enemy launched this frame gets its first move this frame or
+the next depends on which CPU reaches that slot first, and sometimes the
+margin is 19 CPU cycles. A rewrite has no cycle clock, so the port runs the
+two handlers in a fixed, measured order of task slots. The effect is that the
+port is occasionally one frame early or late with something like that, which
+you can't see while playing but a byte-for-byte comparison can.
+
+The same goes for time. The vblank handler sometimes runs longer than a
+frame (clearing the playfield takes most of one), and then the real board
+simply skips the next interrupt and finishes the job in the following frame.
+The few routines that are that slow tell the port how long they took, and the
+scheduler skips the interrupt, or holds the game flow back, as the board does.
+That one took a while to find: game over was happening two frames early.
 
 **There's a leftover bug in the enemy code.** When an enemy clones itself (the
 three-way split some of the bees do in later stages), the ROM means to copy a
@@ -134,10 +151,24 @@ To be straight about where the line is:
 ## Tests
 
 ```sh
-npm test                 # everything
+npm test                 # everything, about 320 tests
 npm run test:oracle      # just the comparisons against the real ROM
+node tools/lockstep-run.mjs 20000 --resync --play=3   # a long side-by-side run
 node tools/shoot.mjs out.png 1300    # screenshot of the ORIGINAL ROM at frame 1300
 ```
+
+The headline test is `test/oracle/lockstep.test.mjs`. It powers up the real
+ROM and the port together and compares all of RAM after every frame:
+
+* From power-on through the self test, the cross hatch and well into the
+  attract demo (about 2,300 frames) the two are identical, apart from a few
+  frames where the board is caught halfway through a playfield clear.
+* Over longer runs, attract mode and played games with a seeded random
+  joystick, the CPU races described above start to show up. The test copies
+  the ROM's RAM into the port whenever a difference lasts three frames and
+  requires that no difference ever lasts more than five. A race costs a
+  frame or two; a real bug keeps coming back right after every copy, and that
+  is what the test catches. Today about 2-3% of frames show a short blip.
 
 `tools/shoot.mjs` runs the real ROM on the test board and draws the result
 with the port's renderer. If those screenshots look like Galaga, the renderer
@@ -172,4 +203,13 @@ docs/          porting guide and notes
 * **Namco**, 1981.
 
 Galaga is a trademark of Bandai Namco. This is a non-commercial study of a
-program I love. The ROM image isn't mine to give away, so bring your own.
+program I love. The game code here is a rewrite, but the graphics, colour
+PROMs, sound waveforms, the program's data tables and the 54xx firmware are
+generated from the original ROM set and ship with the game, so treat those as
+Namco's. The ROM zip itself is not in the repository; the tools and tests
+expect it as `galaga.rom` (MAME's `galaga` set). The listing generator also
+wants Neidermeier's source next to it:
+
+```sh
+git clone https://github.com/neiderm/arcade.git reference/neiderm
+```

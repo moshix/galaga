@@ -11,6 +11,8 @@
  * @see reference/galaga-main.asm $0000, $0038, $0237-$02D0
  */
 
+import { RENDEZVOUS } from '../scheduler.js';
+import { SERVICE_ENTRY } from './gg1_4_post.js';
 import { MAIN, mainAt } from './routines.js';
 import { call } from '../call.js';
 import { rrca } from '../z80ops.js';
@@ -54,8 +56,9 @@ export function* main_reset(m) {
     }
     inner.return(undefined);
     st.ramTest = false;
-    // $097C: jp z,$336C
-    inner = call(MAIN.jp_RAM_test, m);
+    // $097C: jp z,$336C -- entered from inside the IRQ handler, so the self
+    // test starts at the measured point in the frame, not the power-on one.
+    inner = call(MAIN.jp_RAM_test, m, SERVICE_ENTRY);
   }
 }
 
@@ -95,6 +98,18 @@ export function* CPU0_RESET(m) {
  * @param {Machine} m
  */
 export function main_irq(m) {
+  const t = main_irq_steps(m);
+  for (let r = t.next(); !r.done; r = t.next()) { /* run straight through */ }
+}
+
+/**
+ * main_irq as a generator, for the scheduler: identical, except that it
+ * yields RENDEZVOUS right after task f_0828 has copied its half of the
+ * sprite buffers. @see src/game/scheduler.js RENDEZVOUS
+ * @param {Machine} m
+ * @returns {Generator<symbol|number, void, void>}
+ */
+export function* main_irq_steps(m) {
   const d = m.peek(0x6804); // DSWA freeze switch in bit 1 (active low)
   // $0245: c = ((f & $1C) ^ ((f & $1C) >>> 1 rotated)) & $18
   let c = m.peek(0x92a0) & 0x1c;
@@ -119,8 +134,12 @@ export function main_irq(m) {
       // $0281: pointer at $0096 + 2C, again an 8-bit add into L (H = 0).
       const p = (0x96 + ((ci << 1) & 0xff)) & 0xff;
       const task = m.read('main', p) | (m.read('main', p + 1) << 8);
+      // Progress marker: the task slot about to run. The scheduler uses it
+      // to interleave this handler with the sub CPU's.
+      if (task !== 0x0828) yield ci;
       // $028E: call c_task_switcher -> jp (hl)
       mainAt(task)(m);
+      if (task === 0x0828) yield RENDEZVOUS;
       // f_0977 may have jumped to the RAM test: the Z80 never comes back,
       // so neither the 51XX read nor the IRQ1 re-enable happens.
       if (mainState(m).ramTest) return;

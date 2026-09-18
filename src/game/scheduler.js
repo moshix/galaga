@@ -6,13 +6,14 @@
  * replaces that with one fixed order per 1/60.606 s frame, chosen to follow
  * the hardware's own timeline:
  *
- *   line  64   sound CPU NMI          (galaga.cpp cpu3_interrupt_callback)
- *   line 192   sound CPU NMI
+ *   line 150   (FRAME_LINE: where a port frame starts)
+ *   line 192   sound CPU NMI          (galaga.cpp cpu3_interrupt_callback)
  *   line 224   vblank: main and sub CPU IRQs (galaga_state::vblank_irq)
  *              -> the IRQ handlers run to completion (they never wait,
  *                 except at the sprite-copy rendezvous, which cannot block
  *                 in a sequential order -- see f_0828 / f_05BF)
  *   then       each CPU's foreground code runs until it waits again
+ *   line  64   sound CPU NMI (of the next board frame)
  *
  * FOREGROUND CODE AS GENERATORS. Each CPU's non-interrupt code (power-on
  * tests, the main CPU's game flow in g_main, the idle loops) is a JavaScript
@@ -28,6 +29,10 @@
  *
  * Every Galaga IRQ handler ends `ei` / `ret`, so the scheduler clears the
  * interrupt flip-flop on entry and sets it on return, exactly as IM 1 does.
+ *
+ * THE VBLANK RENDEZVOUS. An IRQ handler may be a generator that yields
+ * RENDEZVOUS once. At vblank the scheduler runs every handler up to that
+ * point first (in irqOrder), then lets each run to completion (same order).
  */
 
 import { CPU } from '../machine/machine.js';
@@ -35,15 +40,62 @@ import { CPU } from '../machine/machine.js';
 /** Value a foreground generator yields to be re-polled within the frame. */
 export const SPIN = Symbol('spin');
 
+/**
+ * Yielded by an IRQ handler generator at the vblank rendezvous: right after
+ * the main CPU's f_0828 and the sub CPU's f_05BF have each copied their half
+ * of the sprite buffers to the sprite registers, and before either CPU does
+ * anything else. On the board the two handlers start at the same instant and
+ * wait for each other there, so both copies see the sprite buffers as the
+ * previous frame left them -- before the sub CPU moves any enemy.
+ */
+export const RENDEZVOUS = Symbol('rendezvous');
+
+/** Z80 cycles in one video frame: 384 * 264 pixel clocks / 2. */
+export const CYCLES_PER_FRAME = 50688;
+
+/**
+ * Z80 cycles the main CPU's vblank handler spends besides whatever its
+ * routines explicitly charge (Machine.charge). Measured on the oracle: the
+ * handler that includes the 49,723-cycle attract step takes 63,631 in all,
+ * leaving about 13,900; ordinary handlers take 11,000-15,000. Only the
+ * comparison with a frame matters, and only heavy routines charge, so the
+ * margin is wide either way.
+ */
+export const MAIN_IRQ_BASE_CYCLES = 13000;
+
+/**
+ * Roughly how long the sub CPU's handler takes to move every enemy after the
+ * rendezvous. Main tasks that start later than this see the moved enemies,
+ * so once the main handler has been charged more than this, its remaining
+ * tasks run after the sub CPU's. Any value below the smallest heavy charge
+ * (18,296) and above zero gives the same result today.
+ */
+export const SUB_OVERLAP_CYCLES = 8000;
+
+/** The sub CPU's task slot that moves the enemies (f_08D3). */
+export const SUB_MOTION_SLOT = 2;
+
 /** Sound CPU NMI scan lines. */
 export const SOUND_NMI_LINES = Object.freeze([64, 192]);
+
+/**
+ * Where a port frame begins and ends, as a scan line of the board's frame.
+ * The port's frame k covers the board from this line of frame k to this line
+ * of frame k+1, which is also where the lock-step tests sample the oracle.
+ * It must fall after both vblank handlers have finished (the sub CPU's runs
+ * until about line 103 of the next frame) and before the next sound NMI at
+ * line 192, so that the sampled board is quiet and the port's frame has done
+ * exactly the same work: sound NMI (192), vblank (224), sound NMI (64).
+ */
+export const FRAME_LINE = 160;
 
 /**
  * @typedef {import('../machine/machine.js').Machine} Machine
  * @typedef {Generator<symbol|undefined, void, void>} Thread
  * @typedef {object} CpuPorts entry points each ported CPU provides
  * @property {(m: Machine) => Thread} reset  foreground from the reset vector
- * @property {((m: Machine) => void)=} irq    IRQ (rst $38) handler
+ * @property {((m: Machine) => (void|Thread))=} irq  IRQ (rst $38) handler;
+ *           a generator handler may yield RENDEZVOUS once
  * @property {((m: Machine) => void)=} nmi    NMI handler
  */
 
@@ -51,7 +103,7 @@ export class Scheduler {
   /**
    * @param {Machine} m
    * @param {{ main: CpuPorts, sub: CpuPorts, sound: CpuPorts }} cpus
-   * @param {{ irqOrder?: number[], onVblank?: () => void }} [options]
+   * @param {{ irqOrder?: number[], mainSplit?: number, mainLate?: number, onVblank?: () => void }} [options]
    */
   constructor(m, cpus, options = {}) {
     this.m = m;
@@ -64,11 +116,58 @@ export class Scheduler {
      */
     this.irqOrder = options.irqOrder ?? [CPU.SUB, CPU.MAIN];
     this.onVblank = options.onVblank ?? null;
+    /**
+     * After the rendezvous the two CPUs overlap: the main CPU works down its
+     * task list while the sub CPU moves every enemy. The port runs the main
+     * CPU's tasks in slots below `mainSplit` first, then the whole rest of
+     * the sub CPU's handler, then the remaining main tasks. The value is the
+     * one under which the lock-step tests match the ROM best
+     * (tools/lockstep-run.mjs, measured over attract mode and played games).
+     */
+    this.mainSplit = options.mainSplit ?? 9;
+    /**
+     * The vblank timeline after the rendezvous, as [cpu, before-slot] steps
+     * (see stepFrame). Measured on the oracle, in cycles after vblank: the
+     * main CPU runs its tasks from about +5,000; the sub CPU moves every
+     * enemy (its task 2) from about +4,900 to +18,000, then moves shots and
+     * checks collisions (tasks 4 and 5). Main tasks early in its list start
+     * before the sub's motion pass has got far; the ones after `mainLate`
+     * (player movement and firing, which have a lot of work ahead of them in
+     * a busy frame) start after the sub's collision tasks. Which exact slots
+     * split best was measured with tools/lockstep-run.mjs over attract mode
+     * and played games; the true order varies from frame to frame with the
+     * workload, which is what the remaining one-frame blips are.
+     * @type {Array<[number, number]>}
+     */
+    this.phases = [
+      [CPU.MAIN, this.mainSplit],
+      [CPU.SUB, SUB_MOTION_SLOT + 1],
+      [CPU.MAIN, options.mainLate ?? 12],
+      [CPU.SUB, Infinity],
+      [CPU.MAIN, Infinity],
+    ];
+    /** Cycles the main handler charged this frame (for the foreground budget). */
+    this.irqCharged = 0;
+    /** Main foreground work still owed from earlier frames, in cycles. */
+    this.fgDebt = 0;
+    /** Slot each CPU's handler is paused before, if any. @type {(number|null)[]} */
+    this.pendingSlot = [null, null, null];
     /** @type {(Thread|null)[]} */
     this.threads = [null, null, null];
     /** True while a CPU is inside its interrupt handler. */
     this.inHandler = [false, false, false];
     this.frame = 0;
+    /**
+     * A main vblank handler that runs past the next vblank keeps its IRQ
+     * enable latch clear the whole time ($026A ... $02A8), so that vblank
+     * finds the enable off and asserts nothing: the board loses one main
+     * interrupt, and the handler's remaining tasks run in the next frame.
+     */
+    /**
+     * The rest of a main vblank handler that ran past the next vblank.
+     * @type {Thread | null}
+     */
+    this.mainTail = null;
 
     m.hooks.onRunLatch = (running) => this.setSubsRunning(running);
     m.hooks.onIrqEnable = (cpu) => this.tryIrq(cpu);
@@ -100,34 +199,150 @@ export class Scheduler {
   /**
    * Take a pending IRQ if the CPU can accept it.
    * @param {number} cpu
+   * @param {boolean} [park] stop a generator handler at RENDEZVOUS and
+   *   return it instead of finishing it
+   * @returns {Thread | null} the parked handler, if any
    */
-  tryIrq(cpu) {
+  tryIrq(cpu, park = false) {
     const m = this.m;
-    if (cpu > CPU.SUB || !m.irqLine[cpu] || !m.iff[cpu] || this.inHandler[cpu]) return;
+    if (cpu > CPU.SUB || !m.irqLine[cpu] || !m.iff[cpu] || this.inHandler[cpu]) return null;
     const handler = this.cpus[cpu].irq;
-    if (handler === undefined || !this.running(cpu)) return;
+    if (handler === undefined || !this.running(cpu)) return null;
     m.iff[cpu] = false;
     this.inHandler[cpu] = true;
-    handler(m);
+    const r = handler(m);
+    if (isIterator(r)) {
+      const t = /** @type {Thread} */ (r);
+      if (park) {
+        // Run up to the rendezvous (past the progress markers of any task
+        // before the sprite copy).
+        let r = t.next();
+        while (!r.done && typeof r.value === 'number') r = t.next();
+        if (!r.done && r.value === RENDEZVOUS) return t;
+        if (!r.done) this.drain(t);
+      } else {
+        this.drain(t);
+      }
+    }
+    this.leaveIrq(cpu);
+    return null;
+  }
+
+  /** Run a handler generator to the end. @param {Thread} t */
+  drain(t) {
+    for (let r = t.next(); !r.done; r = t.next()) { /* past the rendezvous */ }
+  }
+
+  /** @param {number} cpu */
+  leaveIrq(cpu) {
     this.inHandler[cpu] = false;
     // Every handler in these ROMs returns through `ei` / `ret`.
-    m.iff[cpu] = true;
+    this.m.iff[cpu] = true;
   }
 
   /** Advance the whole board by one video frame. */
   stepFrame() {
     const m = this.m;
-    for (let i = 0; i < SOUND_NMI_LINES.length; i += 1) {
-      if (this.running(CPU.SOUND) && !m.misc[2] && this.cpus[CPU.SOUND].nmi) this.cpus[CPU.SOUND].nmi(m);
-    }
-    // Vblank asserts the IRQ lines of the CPUs whose enable latch is set.
+    this.soundNmi(); // line 192
+    // Vblank asserts the IRQ lines of the CPUs whose enable latch is set. A
+    // main handler still running from last frame has its latch clear, so
+    // this vblank is simply lost for it.
     if (m.misc[0]) m.irqLine[CPU.MAIN] = true;
     if (m.misc[1] && this.running(CPU.SUB)) m.irqLine[CPU.SUB] = true;
     if (this.onVblank !== null) this.onVblank();
-    for (const cpu of this.irqOrder) this.tryIrq(cpu);
+
+    // Both handlers up to the rendezvous, then both to the end.
+    /** @type {Array<[number, Thread]>} */
+    const parked = [];
+    const tail = this.mainTail;
+    this.mainTail = null;
+    if (tail === null) m.charged = 0;
+    this.pendingSlot[CPU.SUB] = null;
+    if (tail === null) this.pendingSlot[CPU.MAIN] = null;
+    for (const cpu of this.irqOrder) {
+      const t = this.tryIrq(cpu, true);
+      if (t !== null) parked.push([cpu, t]);
+    }
+    const main = parked.find(([cpu]) => cpu === CPU.MAIN);
+    const sub = parked.find(([cpu]) => cpu === CPU.SUB);
+    // After the rendezvous the two handlers overlap. VBLANK_PHASES is the
+    // order the port runs them in: each entry runs one CPU up to (not
+    // including) a task slot. See the table's comment.
+    for (const [cpu, before] of this.phases) {
+      const entry = cpu === CPU.MAIN ? main : sub;
+      if (entry === undefined || !this.inHandler[cpu] || this.mainTail === entry[1]) continue;
+      if (cpu === CPU.MAIN) this.runMain(entry[1], before);
+      else this.runSub(entry[1], before);
+    }
+    // Last frame's overrunning main handler finishes after this frame's
+    // sub handler: that is where its remaining tasks really ran.
+    if (tail !== null) this.runMain(tail, Infinity);
+    this.irqCharged = m.charged;
     this.runForeground();
+    this.soundNmi(); // line 64 of the next board frame
     this.frame += 1;
   }
+
+  /** The sound CPU's NMI, if it runs and its NMI is enabled (latch Q2 low). */
+  soundNmi() {
+    if (this.running(CPU.SOUND) && !this.m.misc[2] && this.cpus[CPU.SOUND].nmi) this.cpus[CPU.SOUND].nmi(this.m);
+  }
+
+  /**
+   * Run the sub CPU's handler until it is about to run a task in slot
+   * `before` or later, or to the end.
+   * @param {Thread} t @param {number} before
+   * @returns {boolean} true if it stopped early and still has work
+   */
+  runSub(t, before) {
+    return this.runUntil(CPU.SUB, t, before);
+  }
+
+  /**
+   * Resume a handler generator. It pauses *before* each task, yielding the
+   * task's slot; a pause at slot >= `before` is where this run stops -- and
+   * the next resume will run that very task.
+   * @param {number} cpu @param {Thread} t @param {number} before
+   * @returns {boolean} true if it stopped early and still has work
+   */
+  runUntil(cpu, t, before) {
+    const pending = this.pendingSlot[cpu];
+    if (pending !== null && pending >= before) return true;
+    this.pendingSlot[cpu] = null;
+    for (;;) {
+      const r = t.next();
+      if (r.done) { this.leaveIrq(cpu); return false; }
+      if (cpu === CPU.MAIN && MAIN_IRQ_BASE_CYCLES + this.m.charged > CYCLES_PER_FRAME) {
+        // Ran past the next vblank: the rest belongs to the next frame.
+        this.m.charged = 0;
+        this.mainTail = t;
+        this.pendingSlot[cpu] = typeof r.value === 'number' ? r.value : null;
+        return false;
+      }
+      if (typeof r.value === 'number' && r.value >= before) {
+        this.pendingSlot[cpu] = r.value;
+        return true;
+      }
+      // A long task pushes the rest of main's work past the sub CPU's.
+      if (cpu === CPU.MAIN && before !== Infinity && this.m.charged > SUB_OVERLAP_CYCLES) {
+        this.pendingSlot[cpu] = typeof r.value === 'number' ? r.value : null;
+        return true;
+      }
+    }
+  }
+
+  /**
+   * Run the main CPU's handler until it is about to run a task in slot
+   * `before` or later (or to the end), or until the time charged to it
+   * passes the next vblank -- in which case the rest is parked in
+   * `mainTail` and runs next frame.
+   * @param {Thread} t @param {number} before
+   * @returns {boolean} true if it stopped early and still has work
+   */
+  runMain(t, before) {
+    return this.runUntil(CPU.MAIN, t, before);
+  }
+
 
   /**
    * Resume every CPU's foreground once, then keep re-polling the threads
@@ -137,11 +352,27 @@ export class Scheduler {
     const m = this.m;
     /** @type {boolean[]} */
     const spinning = [false, false, false];
-    for (let n = 0; n < 3; n += 1) spinning[n] = this.resume(n);
+    // The main CPU's foreground only gets the part of the frame its vblank
+    // handler leaves. Work it charged beyond that (a playfield clear is most
+    // of a frame) keeps the real Z80 busy into the following frames, so the
+    // port holds its foreground back for as long -- the work itself already
+    // happened, but nothing after it can happen any sooner than on the board.
+    const budget = Math.max(0, CYCLES_PER_FRAME - MAIN_IRQ_BASE_CYCLES - this.irqCharged);
+    const mainFree = this.fgDebt < budget;
+    if (!mainFree) this.fgDebt -= budget;
+    const chargedBefore = m.charged;
+    for (let n = 0; n < 3; n += 1) {
+      if (n === CPU.MAIN && !mainFree) continue;
+      spinning[n] = this.resume(n);
+    }
     for (let round = 0; round < 64 && spinning.some(Boolean); round += 1) {
       const before = m.writes;
       for (let n = 0; n < 3; n += 1) if (spinning[n]) spinning[n] = this.resume(n);
       if (m.writes === before) break;
+    }
+    if (mainFree) {
+      const spent = this.fgDebt + (m.charged - chargedBefore);
+      this.fgDebt = Math.max(0, spent - budget);
     }
   }
 
@@ -151,6 +382,8 @@ export class Scheduler {
    */
   resume(n) {
     const t = this.threads[n];
+    // A CPU still inside an interrupt handler runs no foreground code.
+    if (this.inHandler[n]) return false;
     if (t === null) return false;
     const r = t.next();
     if (r.done) {
@@ -161,4 +394,10 @@ export class Scheduler {
     }
     return r.value === SPIN;
   }
+}
+
+/** @param {unknown} r @returns {boolean} */
+function isIterator(r) {
+  return r !== null && typeof r === 'object'
+    && typeof /** @type {{next?: unknown}} */ (r).next === 'function';
 }

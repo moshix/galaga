@@ -14,5 +14,5 @@ export const mainCpu = {
   /** Reset vector $0000. */
   reset: (m) => MAIN.main_reset(m),
   /** rst $38 / IM 1 vector: the task manager at $0237. */
-  irq: (m) => MAIN.main_irq(m),
+  irq: (m) => MAIN.main_irq_steps(m),
 };

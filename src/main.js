@@ -29,7 +29,7 @@ import { SoundEngine } from './audio/sound.js';
  * Displayed in the corner of the page and the single place this is written
  * down. Bump it here when a feature lands, and keep `package.json` in step.
  */
-export const VERSION = '0.1';
+export const VERSION = '0.2';
 
 const FRAME_MS = 1000 / FRAME_RATE;
 /** Never try to catch up more than this after a tab has been backgrounded. */

@@ -8,13 +8,13 @@
  * Frame numbers are port frames = lock-step frames (test/helpers/
  * lockstep.mjs); all measured on the oracle, the port matches every one:
  *
- *     0-698  garbage: the RAM test writes pseudo-random patterns over every
+ *     0-697  garbage: the RAM test writes pseudo-random patterns over every
  *            chip, sound NMI off, sub CPUs held in reset. Tile RAM: 10
  *            passes x 3 patterns (5,899,960 cycles = 116.4 frames), then
  *            30 rounds on each of colour RAM, RAM 1, RAM 2, RAM 3 and tile
  *            RAM again (5,902,282 cycles = 116.4 frames each).
- *    698-699 screen cleared (the clear straddles the vblank); then in 699
- *            "RAM  OK", sprites parked, sub CPUs released.
+ *        698 screen cleared, "RAM  OK"; sprites parked (the loop crosses
+ *            into 699, where the sub CPUs are released).
  *    699-711 ROM checksums of the four main ROMs (159,991 cycles = 3.2
  *            frames each) while the sub and sound CPUs check theirs.
  *        711 "ROM  OK" and the dip switch report (UPRIGHT, RANK x,
@@ -45,7 +45,7 @@
  * TIMING. The RAM and ROM tests run with interrupts off and burn real
  * time; the port must spend the same number of frames in them. The
  * generator keeps a Z80 cycle clock `t` (cycles since the port's frame
- * began: line 63 of the oracle's frame while the main CPU is alone, vblank
+ * began: line FRAME_LINE of the oracle's frame while the main CPU is alone, vblank
  * once the sub CPUs run -- see Clock) and
  * yields each time `t` passes a frame (FRAME_CYCLES), always BEFORE the
  * next write or shared-RAM read, so every write lands in the same frame as
@@ -59,7 +59,7 @@
 
 import { MAIN } from './routines.js';
 import { call } from '../call.js';
-import { SPIN } from '../scheduler.js';
+import { SPIN, FRAME_LINE } from '../scheduler.js';
 import { c_text_out } from './gg1_4_text.js';
 import {
   c_svc_updt_dsply, c_svc_clr_snd_regs, c_spriteposn_regs_init,
@@ -74,23 +74,24 @@ export const FRAME_CYCLES = 50688;
 
 /**
  * Where the port's frames begin, in Z80 cycles after the start of an
- * oracle frame: line 63. test/helpers/lockstep.mjs compares the port after
- * its k-th frame with the oracle at line 63 of frame k+1 (after vblank k's
- * handlers, before the next sound NMI), so a busy loop must yield exactly
- * when the Z80 passes line 63 for the two to hold the same RAM.
+ * oracle frame: FRAME_LINE (scheduler.js). test/helpers/lockstep.mjs
+ * compares the port after its k-th frame with the oracle at that line of
+ * frame k+1 (after vblank k's handlers, before the next sound NMI), so a
+ * busy loop must yield exactly when the Z80 passes that line for the two
+ * to hold the same RAM.
  */
-export const FRAME_ORIGIN = 63 * 192;
+export const FRAME_ORIGIN = FRAME_LINE * 192;
 
 /**
- * The port clock's value at vblank (line 224): cycles since line 63.
+ * The port clock's value at vblank (line 224): cycles since FRAME_LINE.
  */
-export const VBLANK_T = (224 - 63) * 192;
+export const VBLANK_T = (224 - FRAME_LINE) * 192;
 
 /**
  * Clock value at which the power-on path reaches jp_RAM_test: the oracle's
  * main CPU starts at cycle 0 of frame 0 and executes $0000-$02D0 in 480
- * cycles, which is 11,616 cycles BEFORE the first line 63. The port's first
- * frame covers the oracle up to line 63 of frame 1 (lockstep.mjs), so the
+ * cycles, which is 28,320 cycles BEFORE the first FRAME_LINE. The port's
+ * first frame covers the oracle up to FRAME_LINE of frame 1, so the
  * first yield must come a whole frame after that line: t starts negative.
  */
 export const BOOT_ENTRY_CYCLE = 480 - FRAME_ORIGIN;
@@ -115,8 +116,8 @@ export const SERVICE_ENTRY = Object.freeze({ t: VBLANK_T + 14554, c: 0x1f });
 export const CYCLES = Object.freeze({
   /** $336C-$3384: latches, 06XX reset, di, watchdog, ld b,$0A. */
   PROLOGUE: 98,
-  /** $3472-$355A: "RAM  OK", sound regs, $9020, sprite regs, jp. */
-  RAM_OK_TO_ROMTEST: 6250,
+  /** $3472-$3483: "RAM  OK", sound regs, $9020. */
+  RAM_OK_TO_SPRITES: 2489,
   /** One call of c_rom_test_csum_calc: call 17 + body 159,974. */
   CSUM_CALL: 159991,
   /** $35BF-$35E3: "ROM  OK", switch report, $9100 clear, $9000. */
@@ -177,7 +178,7 @@ export const RESUME = Object.freeze({
  * The cycle clock of the boot generator.
  *
  * TWO ALIGNMENTS. While the main CPU is alone (RAM tests), a port frame
- * spans line 63 to line 63, so every frame matches the lock-step sample
+ * spans FRAME_LINE to FRAME_LINE, so every frame matches the lock-step sample
  * exactly. Once the sub and sound CPUs run, what matters is the order of
  * the main CPU's writes against the vblank IRQs of the other CPUs: main
  * code the Z80 runs before vblank k must run in the port BEFORE frame k's
@@ -186,7 +187,7 @@ export const RESUME = Object.freeze({
  * frame counter would land after the sub CPU's increment and the port
  * would leave the $35F3 wait a frame late.) The switch is made at the
  * first synchronisation point after the release at which the Z80 is past
- * vblank but not yet at the next line 63, so no frame is skipped or
+ * vblank but not yet at the next FRAME_LINE, so no frame is skipped or
  * repeated: t just becomes t - VBLANK_T.
  *
  * @typedef {object} Clock
@@ -402,6 +403,23 @@ function* tileramClrTimed(m, clk, ret) {
   yield* sync(clk);
   m.poke(0x99be, 0x07);
   clk.t += 13 + 10;
+}
+
+/**
+ * c_spriteposn_regs_init with its timing, as called at $3483 (call 17,
+ * ld hl 10, ld b 7, then 29 cycles per byte, 24 for the last, ret 10:
+ * 3,751 in all).
+ * @param {Machine} m @param {Clock} clk
+ * @returns {Generator<undefined, void, void>}
+ */
+function* spriteInitTimed(m, clk) {
+  clk.t += 17 + 10 + 7;
+  for (let i = 0; i < 0x80; i += 1) {
+    yield* sync(clk);
+    m.poke(0x9380 + i, 0xf1);
+    clk.t += i === 0x7f ? 24 : 29;
+  }
+  clk.t += 10;
 }
 
 /**
@@ -784,7 +802,7 @@ function* testMenuAndMachineInit(m, clk) {
  * @param {Machine} m
  * @param {{ c?: number, t?: number, clock?: Clock }} [regs]  C = the
  *   Z80's C at entry (it is pushed onto the test stack; 0 after reset);
- *   t = the clock at entry (cycles since line 63; defaults to the power-on
+ *   t = the clock at entry (cycles since FRAME_LINE; defaults to the power-on
  *   value); clock = an object to use as the clock, so a test can watch it
  * @returns {Generator<symbol|undefined, void, void>}
  */
@@ -816,7 +834,7 @@ export function* jp_RAM_test(m, { c = 0, t = BOOT_ENTRY_CYCLE, clock } = {}) {
   clk.t += 20; // ld sp,$8B00 / ld de,$8000
   yield* ramTestBlock(m, clk, 0x8000, 0x8b00, 0x346f, 0); // tile RAM
   yield* tileramClrTimed(m, clk, 0x3472);
-  // $3472-$3489: "RAM  OK" etc., all inside one frame.
+  // $3472-$3483: "RAM  OK", sound registers, $9020 (within one frame).
   yield* sync(clk);
   push(m, 0x8b00, 0x3478);
   c_text_out(m, { hl: 0x3b8b }); // "RAM  OK"
@@ -824,9 +842,13 @@ export function* jp_RAM_test(m, { c = 0, t = BOOT_ENTRY_CYCLE, clock } = {}) {
   push(m, 0x8b00, 0x347e);
   c_svc_clr_snd_regs(m);
   m.poke(0x9020, 0x07); // sub CPU task table: only its empty task
+  clk.t += CYCLES.RAM_OK_TO_SPRITES;
+  // $3483: the sprite registers, timed: the frame boundary (FRAME_LINE)
+  // falls inside this loop.
+  yield* sync(clk);
   push(m, 0x8b00, 0x3486);
-  c_spriteposn_regs_init(m);
-  clk.t += CYCLES.RAM_OK_TO_ROMTEST;
+  yield* spriteInitTimed(m, clk);
+  clk.t += 10; // jp $355A
   yield* romTests(m, clk);
   yield* testMenuInit(m, clk);
   yield* testMenuAndMachineInit(m, clk);

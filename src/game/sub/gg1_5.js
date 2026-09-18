@@ -19,7 +19,7 @@
 
 import { SUB, SUB_AT, subAt } from './routines.js';
 import { romWord, subRom } from '../romdata.js';
-import { SPIN } from '../scheduler.js';
+import { SPIN, RENDEZVOUS } from '../scheduler.js';
 import * as motion from './gg1_5_motion.js';
 import * as hitd from './gg1_5_hitd.js';
 
@@ -105,6 +105,18 @@ export function* sub_reset(m) {
  * @param {Machine} m
  */
 export function sub_irq(m) {
+  const t = sub_irq_steps(m);
+  for (let r = t.next(); !r.done; r = t.next()) { /* run straight through */ }
+}
+
+/**
+ * sub_irq as a generator, for the scheduler: identical, except that it
+ * yields RENDEZVOUS right after task f_05BF has copied its half of the
+ * sprite buffers. @see src/game/scheduler.js RENDEZVOUS
+ * @param {Machine} m
+ * @returns {Generator<symbol, void, void>}
+ */
+export function* sub_irq_steps(m) {
   m.poke(0x6821, 0);
   if ((m.peek(0x6804) & 0x02) !== 0) {
     const fc = (m.peek(0x92a0) + 1) & 0xff;
@@ -136,7 +148,11 @@ export function sub_irq(m) {
         if (n > 0x100) throw new Error('sub CPU: task table empty, IRQ hangs');
       }
       const task = subAt(romWord('sub', (0x3b + ((c << 1) & 0xff)) & 0xff));
+      // Progress marker: the task slot about to run. The scheduler uses it
+      // to interleave this handler with the main CPU's.
+      if (task !== f_05BF) yield c;
       const res = task(m);
+      if (task === f_05BF) yield RENDEZVOUS;
       if (res === RESTART) {
         // rst $00: the handler never returns; see sub_reset.
         restartPending.add(m);
@@ -323,6 +339,7 @@ export function c_0FC6(m, { a, hl }) {
 Object.assign(SUB, {
   sub_reset,
   sub_irq,
+  sub_irq_steps,
   jp_0513_rst38: sub_irq,
   CPU1_RESET,
   f_05BE,
